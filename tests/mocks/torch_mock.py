@@ -6,9 +6,9 @@ testing policy logic, observation mapping, and action conversion without
 actual GPU inference.
 
 Provides numpy-backed replacements for:
-- torch.Tensor (MockTensor) — arithmetic, reshaping, device, slicing
-- torch.nn.Parameter (MockParameter) — with requires_grad and device
-- torch.device (MockDevice) — type string, equality, hashing
+- torch.Tensor (MockTensor) - arithmetic, reshaping, device, slicing
+- torch.nn.Parameter (MockParameter) - with requires_grad and device
+- torch.device (MockDevice) - type string, equality, hashing
 - Factory functions: tensor, zeros, ones, randint, rand, from_numpy, stack, cat
 - Context managers: no_grad, inference_mode
 - Submodules: torch.nn, torch.cuda, torch.backends, torch.amp
@@ -45,7 +45,7 @@ class MockTensor:
         else:
             self._data = np.array(data, dtype=np.float32)
 
-    # --- Properties ---
+    # Properties
 
     @property
     def shape(self):
@@ -63,7 +63,7 @@ class MockTensor:
     def device(self):
         return MockDevice("cpu")
 
-    # --- Shape / size helpers ---
+    # Shape / size helpers
 
     def dim(self):
         return self._data.ndim
@@ -76,7 +76,7 @@ class MockTensor:
     def numel(self):
         return int(self._data.size)
 
-    # --- Conversion ---
+    # Conversion
 
     def item(self):
         return float(self._data.flat[0])
@@ -108,7 +108,7 @@ class MockTensor:
     def contiguous(self):
         return self
 
-    # --- Reshaping ---
+    # Reshaping
 
     def unsqueeze(self, dim):
         return MockTensor(np.expand_dims(self._data, axis=dim))
@@ -127,7 +127,7 @@ class MockTensor:
     def permute(self, *dims):
         return MockTensor(np.transpose(self._data, dims))
 
-    # --- Reduction ---
+    # Reduction
 
     def max(self):
         return float(self._data.max()) if self._data.size > 0 else 0.0
@@ -135,7 +135,7 @@ class MockTensor:
     def min(self):
         return float(self._data.min()) if self._data.size > 0 else 0.0
 
-    # --- Dunder methods ---
+    # Dunder methods
 
     def __len__(self):
         return self._data.shape[0] if self._data.ndim > 0 else 1
@@ -231,9 +231,7 @@ class _NoGrad:
         return func
 
 
-# ---------------------------------------------------------------------------
 # Factory functions
-# ---------------------------------------------------------------------------
 
 
 def _tensor(data, dtype=None, device=None):
@@ -282,9 +280,7 @@ def _randn(*shape, dtype=None, device=None):
     return MockTensor(np.random.randn(*shape).astype(np.float32))
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 
 def install_torch_mock():
@@ -295,8 +291,8 @@ def install_torch_mock():
     try:
         import torch  # noqa: F401
 
-        logger.info("Real torch is available (version=%s) — mock not installed", torch.__version__)
-        return  # Real torch available — nothing to do
+        logger.info("Real torch is available (version=%s) - mock not installed", torch.__version__)
+        return  # Real torch available - nothing to do
     except ImportError:
         pass
 

@@ -1,4 +1,4 @@
-"""Tests for strands_robots.utils — require_optional lazy import helper."""
+"""Tests for strands_robots.utils - require_optional lazy import helper."""
 
 import pytest
 
@@ -51,7 +51,7 @@ class TestRequireOptional:
         assert hasattr(mod, "join")
 
 
-# ── safe_join / get_search_paths tests (added for PR #84 follow-up) ──
+# safe_join / get_search_paths tests (added for PR #84 follow-up)
 
 
 class TestSafeJoin:
@@ -78,7 +78,7 @@ class TestSafeJoin:
     def test_same_path_is_allowed(self, tmp_path):
         from strands_robots.utils import safe_join
 
-        # Empty / dot path resolves to base itself — must not raise
+        # Empty / dot path resolves to base itself - must not raise
         result = safe_join(tmp_path, ".")
         assert result == tmp_path
 

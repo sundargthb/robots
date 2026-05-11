@@ -1,4 +1,4 @@
-"""GR00T policy — N1.5/N1.6 service and local inference.
+"""GR00T policy - N1.5/N1.6 service and local inference.
 
 Implements :class:`~strands_robots.policies.base.Policy` for NVIDIA GR00T models.
 
@@ -33,9 +33,7 @@ from .data_config import Gr00tDataConfig, load_data_config
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Isaac-GR00T version detection
-# ---------------------------------------------------------------------------
 
 _GROOT_VERSION: str | None = None  # "n1.5", "n1.6", "n1.7", or None
 
@@ -61,7 +59,7 @@ def _detect_groot_version(*, force: bool = False) -> str | None:
     # Reset before re-detection
     _GROOT_VERSION = None
 
-    # N1.7 first — the new Cosmos-Reason2-2B backbone lives here.
+    # N1.7 first - the new Cosmos-Reason2-2B backbone lives here.
     # Detecting by subpackage (not enum values) keeps the probe cheap.
     try:
         if importlib.util.find_spec("gr00t.model.gr00t_n1d7") is not None:
@@ -90,9 +88,7 @@ def _detect_groot_version(*, force: bool = False) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Mapping dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -100,8 +96,8 @@ class ObservationMapping:
     """Maps robot sensor names → model modality keys.
 
     Attributes:
-        video: ``{robot_camera: model_video_key}`` — bare, no prefix.
-        state: ``{robot_state: model_state_key}`` — bare, no prefix.
+        video: ``{robot_camera: model_video_key}`` - bare, no prefix.
+        state: ``{robot_state: model_state_key}`` - bare, no prefix.
         language_key: Model's language key (e.g. ``"task"``).
     """
 
@@ -139,7 +135,7 @@ class ActionMapping:
     """Maps model action keys → robot actuator names.
 
     Attributes:
-        actions: ``{model_action_key: robot_actuator}`` — bare, no prefix.
+        actions: ``{model_action_key: robot_actuator}`` - bare, no prefix.
     """
 
     actions: dict[str, str] = field(default_factory=dict)
@@ -152,9 +148,7 @@ class ActionMapping:
                 raise ValueError(f"Action mapping: model key '{model_key}' not in model: {sorted(model_action)}")
 
 
-# ---------------------------------------------------------------------------
 # Auto-inference (exact name match → positional fallback)
-# ---------------------------------------------------------------------------
 
 
 def _auto_infer_observation_mapping(
@@ -214,9 +208,7 @@ def _match_keys(ours: list[str], model: list[str], label: str) -> dict[str, str]
     return mapping
 
 
-# ---------------------------------------------------------------------------
 # Parse user-provided flat mapping dicts
-# ---------------------------------------------------------------------------
 
 
 def _parse_observation_mapping(
@@ -247,13 +239,11 @@ def _parse_action_mapping(flat: dict[str, str]) -> ActionMapping:
     return ActionMapping(actions={k.removeprefix("action."): v for k, v in flat.items()})
 
 
-# ---------------------------------------------------------------------------
 # Gr00tPolicy
-# ---------------------------------------------------------------------------
 
 
 class Gr00tPolicy(Policy):
-    """GR00T policy — service mode and local inference (N1.5/N1.6).
+    """GR00T policy - service mode and local inference (N1.5/N1.6).
 
     For **local mode**, loads the model directly and talks its native nested-dict
     format.  Robot↔model key translation is done by explicit mappings.
@@ -317,7 +307,7 @@ class Gr00tPolicy(Policy):
         self._groot_version = groot_version or _detect_groot_version()
         self._strict = strict
 
-        # DOF per model state key — discovered from model at load time
+        # DOF per model state key - discovered from model at load time
         self._model_state_dof: dict[str, int] = {}
 
         # Raw user mappings (parsed after model load)
@@ -348,9 +338,7 @@ class Gr00tPolicy(Policy):
             self.data_config_name,
         )
 
-    # ------------------------------------------------------------------
     # Mapping initialization
-    # ------------------------------------------------------------------
 
     def _init_mappings(self) -> None:
         """Initialize observation/action mappings after model load."""
@@ -463,16 +451,14 @@ class Gr00tPolicy(Policy):
         missing = all_keys - discovered
         if missing:
             logger.warning(
-                "Could not discover DOF for state keys: %s — these will not be zero-filled if unmapped",
+                "Could not discover DOF for state keys: %s - these will not be zero-filled if unmapped",
                 sorted(missing),
             )
 
         if self._model_state_dof:
             logger.info("Model state DOF: %s", self._model_state_dof)
 
-    # ------------------------------------------------------------------
     # Model loading
-    # ------------------------------------------------------------------
 
     def _load_local_policy(self, model_path: str, embodiment_tag: str, device: str):
         if self._groot_version == "n1.7":
@@ -504,7 +490,7 @@ class Gr00tPolicy(Policy):
         logger.info("GR00T N1.5 loaded from %s", model_path)
 
     def _load_n16(self, model_path: str, embodiment_tag: str, device: str):
-        """Load N1.6 — uses Gr00tPolicy directly (NOT SimPolicyWrapper)."""
+        """Load N1.6 - uses Gr00tPolicy directly (NOT SimPolicyWrapper)."""
         from gr00t.data.embodiment_tags import EmbodimentTag
         from gr00t.policy.gr00t_policy import Gr00tPolicy as N16Policy
 
@@ -518,7 +504,7 @@ class Gr00tPolicy(Policy):
         logger.info("GR00T N1.6 loaded from %s (direct)", model_path)
 
     def _load_n17(self, model_path: str, embodiment_tag: str, device: str):
-        """Load N1.7 — identical entry point to N1.6 (same ``Gr00tPolicy`` signature).
+        """Load N1.7 - identical entry point to N1.6 (same ``Gr00tPolicy`` signature).
 
         The user-visible policy class is still ``gr00t.policy.gr00t_policy.Gr00tPolicy``;
         internally it pulls the new Cosmos-Reason2-2B / Qwen3-VL backbone via
@@ -537,9 +523,7 @@ class Gr00tPolicy(Policy):
         )
         logger.info("GR00T N1.7 loaded from %s (direct)", model_path)
 
-    # ------------------------------------------------------------------
     # Policy interface
-    # ------------------------------------------------------------------
 
     @property
     def provider_name(self) -> str:
@@ -553,9 +537,7 @@ class Gr00tPolicy(Policy):
             return self._local_get_actions(observation_dict, instruction)
         return self._service_get_actions(observation_dict, instruction)
 
-    # ------------------------------------------------------------------
-    # Local inference — talks model's native nested-dict format
-    # ------------------------------------------------------------------
+    # Local inference - talks model's native nested-dict format
 
     def _local_get_actions(self, robot_obs: dict[str, Any], instruction: str) -> list[dict[str, Any]]:
         """Local: prepare nested obs → infer → unpack actions."""
@@ -589,7 +571,7 @@ class Gr00tPolicy(Policy):
 
         assert self._obs_mapping is not None, "Observation mapping not initialized"
 
-        # ── Video ──
+        # Video
         mapped_video_keys = set(self._obs_mapping.video.keys())
         for robot_key, model_key in self._obs_mapping.video.items():
             if robot_key in robot_obs:
@@ -603,7 +585,7 @@ class Gr00tPolicy(Policy):
                     ref = _reference_video_shape(robot_obs, mapped_video_keys)
                     video_dict[model_key] = np.zeros((1, 1, *ref), dtype=np.uint8)
 
-        # ── State ──
+        # State
         for robot_key, model_key in self._obs_mapping.state.items():
             if robot_key in robot_obs:
                 state_dict[model_key] = _to_state_batch(robot_obs[robot_key])
@@ -619,11 +601,11 @@ class Gr00tPolicy(Policy):
                         state_dict[model_key] = np.zeros((1, 1, dof), dtype=np.float32)
                     else:
                         logger.debug(
-                            "Skipping zero-fill for '%s' — DOF unknown",
+                            "Skipping zero-fill for '%s' - DOF unknown",
                             model_key,
                         )
 
-        # ── Language ──
+        # Language
         lang_key = self._obs_mapping.language_key
         language_dict = {lang_key: [[instruction]]}
 
@@ -663,9 +645,7 @@ class Gr00tPolicy(Policy):
 
         return actions
 
-    # ------------------------------------------------------------------
     # Service inference
-    # ------------------------------------------------------------------
 
     def _service_get_actions(self, robot_obs: dict[str, Any], instruction: str) -> list[dict[str, Any]]:
         """Service mode: build observation, call server, unpack."""
@@ -735,7 +715,7 @@ class Gr00tPolicy(Policy):
                 actions.append(step)
             return actions
 
-        # No mapping — return bare model keys
+        # No mapping - return bare model keys
         actions = []
         for t in range(horizon):
             step = {}
@@ -746,9 +726,7 @@ class Gr00tPolicy(Policy):
         return actions
 
 
-# ---------------------------------------------------------------------------
-# Shape helpers — match Isaac-GR00T's expected formats exactly
-# ---------------------------------------------------------------------------
+# Shape helpers - match Isaac-GR00T's expected formats exactly
 
 
 def _to_video_batch(value: np.ndarray) -> np.ndarray:

@@ -1,4 +1,4 @@
-"""Tests for strands_robots.registry — tests for loader, policies, and robots modules."""
+"""Tests for strands_robots.registry - tests for loader, policies, and robots modules."""
 
 import pytest
 
@@ -17,11 +17,11 @@ from strands_robots.registry.robots import (
     resolve_name,
 )
 
-# ─── Loader tests ─────────────────────────────────────────────────────
+# Loader tests
 
 
 class TestLoader:
-    """loader.py — JSON loading, caching, hot-reload, and validation."""
+    """loader.py - JSON loading, caching, hot-reload, and validation."""
 
     def test_load_caches_and_returns_same_object(self):
         """Consecutive loads without file change should return cached data."""
@@ -115,7 +115,7 @@ class TestLoader:
         _validate("policies", clean_policies)
 
 
-# ─── Policy resolution tests ──────────────────────────────────────────
+# Policy resolution tests
 
 
 class TestResolvePolicy:
@@ -192,7 +192,7 @@ class TestResolvePolicy:
         assert provider == "groot"
 
 
-# ─── Provider lookup tests ────────────────────────────────────────────
+# Provider lookup tests
 
 
 class TestProviderLookup:
@@ -228,7 +228,7 @@ class TestProviderLookup:
         assert config["class"] == "MockPolicy"
 
 
-# ─── import_policy_class tests ────────────────────────────────────────
+# import_policy_class tests
 
 
 class TestImportPolicyClass:
@@ -254,7 +254,7 @@ class TestImportPolicyClass:
         assert cls is MockPolicy
 
 
-# ─── build_policy_kwargs tests ────────────────────────────────────────
+# build_policy_kwargs tests
 
 
 class TestBuildPolicyKwargs:
@@ -298,11 +298,11 @@ class TestBuildPolicyKwargs:
         assert kwargs["host"] == "localhost"  # from defaults
 
 
-# ─── Robot registry tests ─────────────────────────────────────────────
+# Robot registry tests
 
 
 class TestRobotRegistry:
-    """robots.py — resolve, query, filter, and format robot definitions."""
+    """robots.py - resolve, query, filter, and format robot definitions."""
 
     def test_resolve_name_canonical(self):
         assert resolve_name("so100") == "so100"

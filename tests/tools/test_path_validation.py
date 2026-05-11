@@ -19,7 +19,7 @@ from strands_robots.tools._path_validation import (
 class TestValidateSavePath:
     """Tests for the validate_save_path helper."""
 
-    # ── Happy-path tests ──────────────────────────────────────────────
+    # Happy-path tests
 
     def test_returns_resolved_absolute_path(self, tmp_path):
         """A relative path should be resolved to an absolute path."""
@@ -52,7 +52,7 @@ class TestValidateSavePath:
         result = validate_save_path(target, label="save_path")
         assert result == target
 
-    # ── Empty / null-byte rejection ───────────────────────────────────
+    # Empty / null-byte rejection
 
     def test_rejects_empty_string(self):
         with pytest.raises(ValueError, match="must not be empty"):
@@ -66,7 +66,7 @@ class TestValidateSavePath:
         with pytest.raises(ValueError, match="contains invalid characters"):
             validate_save_path("/tmp/foo\x00/bar")
 
-    # ── Directory-traversal rejection ─────────────────────────────────
+    # Directory-traversal rejection
 
     def test_rejects_double_dot_component(self):
         with pytest.raises(ValueError, match="path traversal"):
@@ -92,7 +92,7 @@ class TestValidateSavePath:
         result = validate_save_path(target)
         assert os.path.isabs(result)
 
-    # ── Blocked prefix rejection ──────────────────────────────────────
+    # Blocked prefix rejection
 
     @pytest.mark.parametrize("prefix", BLOCKED_PREFIXES)
     def test_rejects_all_blocked_prefixes(self, prefix):
@@ -134,8 +134,6 @@ class TestValidateSavePath:
         with pytest.raises(ValueError, match="protected system directory"):
             validate_save_path("/var/spool/at/job.001")
 
-    # ── Trailing-slash correctness (the review comment) ───────────────
-
     @pytest.mark.skipif(sys.platform == "win32", reason="Linux-specific paths")
     def test_blocked_prefix_trailing_slash_precision(self):
         """Paths that merely share a common prefix but are NOT inside
@@ -152,7 +150,7 @@ class TestValidateSavePath:
     @pytest.mark.skipif(sys.platform == "win32", reason="Linux-specific paths")
     def test_blocked_prefix_exact_dir_match(self):
         """The exact blocked directory itself (e.g. /var/spool/cron)
-        should also be rejected — it's the container directory."""
+        should also be rejected - it's the container directory."""
         with patch("os.path.realpath", return_value="/var/spool/cron"):
             with pytest.raises(ValueError, match="protected system directory"):
                 validate_save_path("/var/spool/cron")
@@ -163,8 +161,6 @@ class TestValidateSavePath:
         expected_sep = "\\" if sys.platform == "win32" else "/"
         for prefix in BLOCKED_PREFIXES:
             assert prefix.endswith(expected_sep), f"BLOCKED_PREFIXES entry missing trailing separator: {prefix!r}"
-
-    # ── Custom label tests ────────────────────────────────────────────
 
     def test_custom_label_in_empty_error(self):
         with pytest.raises(ValueError, match="save_path must not be empty"):
@@ -179,7 +175,7 @@ class TestValidateSavePath:
         with pytest.raises(ValueError, match="storage_dir resolves to"):
             validate_save_path("/etc/crontab", label="storage_dir")
 
-    # ── Symlink resolution ────────────────────────────────────────────
+    # Symlink resolution
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Symlinks differ on Windows")
     def test_symlink_to_blocked_dir_is_rejected(self, tmp_path):
@@ -219,6 +215,26 @@ class TestCrossPlatformPrefixes:
             assert "/etc/" in prefixes  # Linux shared
             assert "/System/" in prefixes  # macOS specific
             assert "/Library/LaunchDaemons/" in prefixes
+
+    def test_darwin_includes_private_variants(self):
+        """Regression: on macOS, ``os.path.realpath`` maps ``/etc`` →
+        ``/private/etc`` (and same for ``/var``, ``/tmp``). The blocked
+        prefix list MUST include the ``/private/``-prefixed variants,
+        otherwise resolved paths bypass the check entirely. Fixes the
+        bug where ``/etc/passwd`` was silently accepted on macOS."""
+        with patch.object(sys, "platform", "darwin"):
+            prefixes = _get_blocked_prefixes()
+            assert "/private/etc/" in prefixes
+            assert "/private/var/spool/cron/" in prefixes
+            assert "/private/var/spool/at/" in prefixes
+
+    def test_linux_excludes_private_variants(self):
+        """On Linux ``/private/`` is not a special path; the variants
+        should only be added on darwin."""
+        with patch.object(sys, "platform", "linux"):
+            prefixes = _get_blocked_prefixes()
+            for p in prefixes:
+                assert not p.startswith("/private/"), f"Linux should not block /private/* prefixes: {p!r}"
 
     def test_windows_prefixes_returned_on_win32(self):
         """On Windows, Windows-specific prefixes should be active."""

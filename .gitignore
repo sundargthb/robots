@@ -10,3 +10,7 @@ dist
 .strands_robots
 .coverage
 .ideation/
+MUJOCO_LOG.TXT
+TASKS.md
+TASKS_TO_FIX_85.md
+.coverage.*

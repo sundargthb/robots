@@ -48,13 +48,16 @@ groot-service = [
 lerobot = [
     "lerobot>=0.5.0,<0.6.0",
 ]
-sim = [
+sim-mujoco = [
     "robot_descriptions>=1.11.0,<2.0.0",
+    "mujoco>=3.2.0,<4.0.0",
+    "imageio>=2.28.0,<3.0.0",
+    "imageio-ffmpeg>=0.4.0,<1.0.0",
 ]
 all = [
     "strands-robots[groot-service]",
     "strands-robots[lerobot]",
-    "strands-robots[sim]",
+    "strands-robots[sim-mujoco]",
 ]
 dev = [
     "pytest>=6.0,<9.0.0",
@@ -79,6 +82,7 @@ packages = ["strands_robots"]
 
 [tool.hatch.envs.default]
 installer = "uv"
+features = ["all"]
 dependencies = [
     "pytest>=6.0,<9.0.0",
     "pytest-cov>=4.0.0,<6.0.0",
@@ -128,7 +132,7 @@ ignore_missing_imports = false
 
 # Third-party libs without type stubs
 [[tool.mypy.overrides]]
-module = ["lerobot.*", "gr00t.*", "draccus.*", "msgpack.*", "zmq.*", "huggingface_hub.*", "serial.*", "psutil.*", "torch.*", "torchvision.*", "transformers.*", "einops.*", "robot_descriptions.*"]
+module = ["lerobot.*", "gr00t.*", "draccus.*", "msgpack.*", "zmq.*", "huggingface_hub.*", "serial.*", "psutil.*", "torch.*", "torchvision.*", "transformers.*", "einops.*", "robot_descriptions.*", "mujoco.*", "imageio.*"]
 ignore_missing_imports = true
 
 # @tool decorator injects runtime signatures mypy cannot check
@@ -160,6 +164,22 @@ disallow_untyped_defs = false
 module = ["strands_robots.registry.*"]
 warn_return_any = false
 disallow_untyped_defs = false
+
+# MuJoCo simulation — mixins use cooperative self._world patterns
+# attr-defined: Mixins access self._world/self._lock/etc. from Simulation (cooperative pattern)
+# assignment: PEP 484 implicit Optional (= None on typed params)
+# override: Subclass signatures extend base with extra params (orientation, mesh_path)
+# misc: Multiple inheritance method resolution conflicts between mixin + ABC
+[[tool.mypy.overrides]]
+module = ["strands_robots.simulation.mujoco.*"]
+disallow_untyped_defs = false
+warn_return_any = false
+
+# Async utils and dataset recorder — thin wrappers with dynamic types
+[[tool.mypy.overrides]]
+module = ["strands_robots._async_utils", "strands_robots.dataset_recorder"]
+disallow_untyped_defs = false
+warn_return_any = false
 
 # Test files — relaxed type checking for mocks, fixtures, and test utilities
 [[tool.mypy.overrides]]

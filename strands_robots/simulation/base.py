@@ -1,7 +1,7 @@
-"""Simulation ABC — backend-agnostic interface for all simulation engines.
+"""Simulation ABC - backend-agnostic interface for all simulation engines.
 
 Every simulation backend (MuJoCo, Isaac, Newton) implements this interface.
-Agent tools and the Robot() factory interact through these methods only —
+Agent tools and the Robot() factory interact through these methods only -
 they never touch backend-specific APIs directly.
 
 Usage::
@@ -20,7 +20,17 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from strands_robots.policies import Policy
+
+# PolicyRunner and VideoConfig are used by run_policy / replay / eval_policy.
+# We could defer these with inline lazy imports (and historically did), but
+# policy_runner.py only imports `SimEngine` from base under TYPE_CHECKING so
+# the runtime cycle doesn't actually exist. Keep the imports at module level
+# to break the AST-visible cycle that static analysers flag.
+from strands_robots.simulation.policy_runner import PolicyRunner, VideoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,18 +39,25 @@ class SimEngine(ABC):
     """Abstract base class for simulation engines.
 
     Defines the contract that all backends (MuJoCo, Isaac, Newton) must
-    implement. This is the *programmatic* API — the AgentTool layer
+    implement. This is the *programmatic* API - the AgentTool layer
     wraps it with tool_spec/stream for LLM access.
 
     Method categories:
 
-    **Required** (``@abstractmethod``): Core simulation loop — world
-    lifecycle, entity management, observation/action, rendering. Every
-    physics engine must implement these to be usable.
+    **Required** (``@abstractmethod``): Core simulation loop - world
+    lifecycle, entity management, observation/action, rendering, robot
+    discovery. Every physics engine must implement these to be usable.
+
+    **Provided** (concrete base-class methods): Policy orchestration
+    (``run_policy`` / ``start_policy`` / ``replay_episode`` / ``eval_policy``)
+    is implemented once in this ABC as a facade over the abstract primitives.
+    Backends inherit them for free by implementing the primitives. They
+    *may* override for backend-specific optimisations (e.g. GPU-batched
+    policy inference on Isaac).
 
     **Optional** (default raises ``NotImplementedError``): Higher-level
-    features — scene loading, policy running, domain randomization,
-    contact queries. Backends opt in by overriding only what they support.
+    features - scene loading, domain randomization, contact queries.
+    Backends opt in by overriding only what they support.
 
     Lifecycle::
 
@@ -61,7 +78,7 @@ class SimEngine(ABC):
         sim.destroy()
     """
 
-    # --- World lifecycle ---
+    # World lifecycle
 
     @abstractmethod
     def create_world(
@@ -93,7 +110,7 @@ class SimEngine(ABC):
         """Get full simulation state summary."""
         ...
 
-    # --- Robot management ---
+    # Robot management
 
     @abstractmethod
     def add_robot(
@@ -112,7 +129,26 @@ class SimEngine(ABC):
         """Remove a robot from the simulation."""
         ...
 
-    # --- Object management ---
+    @abstractmethod
+    def list_robots(self) -> list[str]:
+        """Return ordered list of robot names currently in the world.
+
+        Used by the backend-agnostic ``PolicyRunner`` to resolve a
+        default robot when the caller omits ``robot_name``.
+        """
+        ...
+
+    @abstractmethod
+    def robot_joint_names(self, robot_name: str) -> list[str]:
+        """Return ordered joint names for ``robot_name``.
+
+        Used by ``Policy.set_robot_state_keys`` and by
+        ``PolicyRunner.replay`` to map dataset action-vector indices to
+        named joints. Order must match the backend's action ordering.
+        """
+        ...
+
+    # Object management
 
     @abstractmethod
     def add_object(
@@ -136,31 +172,58 @@ class SimEngine(ABC):
         """Remove an object from the scene."""
         ...
 
-    # --- Observation / Action ---
+    # Observation / Action
 
     @abstractmethod
-    def get_observation(self, robot_name: str | None = None, camera_name: str | None = None) -> dict[str, Any]:
-        """Get observation from simulation.
+    def get_observation(self, robot_name: str | None = None, *, skip_images: bool = False) -> dict[str, Any]:
+        """Get full observation for a robot: joint state + all attached cameras.
 
-        Convenience method that delegates to the underlying Robot
-        abstraction. Provides a unified interface for agent tools
-        that interact with simulation without needing to distinguish
-        between Robot and Sim layers.
+        Unified observation consumed by :class:`Policy` and
+        :class:`~strands_robots.simulation.policy_runner.PolicyRunner`.
+        Backends MUST return a dict with the following schema; extra keys
+        are allowed.
+
+        Schema:
+            - ``"<joint_name>"`` (float): One entry per joint on the robot,
+              keyed by the *short* joint name (e.g. ``"shoulder_pan"``).
+              The schema is stable regardless of multi-robot namespacing
+              at the physics-engine level.
+            - ``"<camera_name>"`` (np.ndarray): One RGB uint8 frame per
+              camera associated with the robot, keyed by camera name.
+              Shape ``(H, W, 3)``. Cameras whose render fails MAY be
+              omitted; joint state MUST still be returned.
+
+        Single-camera rendering is :meth:`render`'s job, not this method's.
+        For batched multi-robot observation (future Isaac / Newton), add a
+        separate ``get_observations(robot_names)`` method - do NOT extend
+        this one.
+
+        Args:
+            robot_name: Which robot to observe. If ``None`` and exactly one
+                robot exists, that robot is used; otherwise returns ``{}``.
+
+        Returns:
+            Observation dict per schema above. Returns ``{}`` if the world
+            is not yet created or ``robot_name`` is unknown.
         """
         ...
 
     @abstractmethod
     def send_action(self, action: dict[str, Any], robot_name: str | None = None, n_substeps: int = 1) -> None:
-        """Apply action to simulation.
+        """Apply action and advance physics by n_substeps.
 
-        Convenience method that delegates to the underlying Robot
-        abstraction. The simulation engine acts as a facade so agent
-        tools can use ``sim.send_action()`` without knowing about
-        the Robot/Policy layer.
+        Contract: each call writes actuator/ctrl values and then runs
+        ``n_substeps`` physics steps (e.g. mj_step). PolicyRunner.run()
+        relies on this — it calls send_action once per control step and
+        does NOT call sim.step() separately.
+
+        Backends are responsible for internal thread-safety (e.g.
+        MuJoCo acquires self._lock here). PolicyRunner does not manage
+        locks.
         """
         ...
 
-    # --- Rendering ---
+    # Rendering
 
     @abstractmethod
     def render(
@@ -174,22 +237,238 @@ class SimEngine(ABC):
         """
         ...
 
-    # --- Optional overrides (have default no-op implementations) ---
+    # Policy orchestration (concrete facade, not abstract)
+
+    def run_policy(
+        self,
+        robot_name: str,
+        policy_provider: str = "mock",
+        policy_config: dict[str, Any] | None = None,
+        instruction: str = "",
+        duration: float = 10.0,
+        control_frequency: float = 50.0,
+        action_horizon: int = 8,
+        fast_mode: bool = False,
+        video: dict[str, Any] | None = None,
+        policy_object: Policy | None = None,
+        n_steps: int | None = None,
+        max_steps: int | None = None,
+        max_onframe_failures: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a policy loop in the simulation (blocking).
+
+        Default implementation delegates to the backend-agnostic
+        :class:`~strands_robots.simulation.policy_runner.PolicyRunner`.
+        Backends MAY override for backend-specific optimisations
+        (e.g. GPU-batched policy inference on Isaac).
+
+        Args:
+            robot_name: Robot to control.
+            policy_provider: Name passed to
+                :func:`strands_robots.policies.create_policy`.
+            policy_config: Opaque dict of provider-specific kwargs
+                (``observation_mapping``, ``action_mapping``, ``host``,
+                ``port``, ``api_token``, ``pretrained_name_or_path``,
+                ``trust_remote_code``, ``actions_per_step``,
+                ``use_processor``, ``processor_overrides``, ``device``,
+                ...). Forwarded verbatim to ``create_policy``.
+            instruction: Natural-language instruction for the policy.
+            duration: Wall-clock seconds to run.
+            control_frequency: Target Hz for policy queries.
+            action_horizon: Max actions per policy call.
+            fast_mode: Skip real-time sleep between steps.
+            video: Optional video-recording config dict. Accepted keys:
+                ``path`` (str, output MP4 - required to enable recording),
+                ``fps`` (int, default 30), ``camera`` (str, default backend
+                default), ``width`` (int, default 640), ``height`` (int,
+                default 480). See :class:`~strands_robots.simulation.policy_runner.VideoConfig`.
+                For extension points beyond video (custom telemetry,
+                dataset recording), backends plug into
+                ``PolicyRunner.run``'s ``on_frame`` hook via
+                :meth:`_make_run_policy_hook`.
+
+        Returns:
+            Standard status dict.
+        """
+        from strands_robots.policies import create_policy
+
+        # accept n_steps (or legacy max_steps) as an alternate horizon
+        # specification. duration = n_steps / control_frequency. If both
+        # are passed, n_steps wins (primary per DoD).
+        if n_steps is None and max_steps is not None:
+            n_steps = int(max_steps)
+        if n_steps is not None:
+            if n_steps <= 0:
+                return {
+                    "status": "error",
+                    "content": [{"text": f"run_policy: n_steps must be > 0, got {n_steps}."}],
+                }
+            if control_frequency <= 0:
+                return {
+                    "status": "error",
+                    "content": [{"text": "run_policy: control_frequency must be > 0 when n_steps is used."}],
+                }
+            duration = float(n_steps) / float(control_frequency)
+
+        if robot_name not in self.list_robots():
+            return {
+                "status": "error",
+                "content": [{"text": f"Robot '{robot_name}' not found."}],
+            }
+
+        if policy_object is not None:
+            # Pre-built policy path - skip the expensive create_policy call.
+            # Caller is responsible for policy.set_robot_state_keys(...) if needed,
+            # but we set it here defensively so the semantics match the provider path.
+            policy = policy_object
+        else:
+            policy = create_policy(policy_provider, **(policy_config or {}))
+        policy.set_robot_state_keys(self.robot_joint_names(robot_name))
+
+        on_frame = self._make_run_policy_hook(robot_name, instruction)
+
+        return PolicyRunner(self).run(
+            robot_name,
+            policy,
+            instruction=instruction,
+            duration=duration,
+            control_frequency=control_frequency,
+            action_horizon=action_horizon,
+            fast_mode=fast_mode,
+            video=VideoConfig.from_dict(video),
+            on_frame=on_frame,
+            max_onframe_failures=max_onframe_failures,
+        )
+
+    def start_policy(
+        self,
+        robot_name: str,
+        policy_provider: str = "mock",
+        policy_config: dict[str, Any] | None = None,
+        instruction: str = "",
+        duration: float = 10.0,
+        control_frequency: float = 50.0,
+        action_horizon: int = 8,
+        fast_mode: bool = False,
+        video: dict[str, Any] | None = None,
+        policy_object: Policy | None = None,
+        n_steps: int | None = None,
+        max_steps: int | None = None,
+    ) -> dict[str, Any]:
+        """Start policy execution in a background thread (non-blocking).
+
+        Default implementation: synchronous passthrough to ``run_policy``.
+        Backends that support true background execution (like MuJoCo via
+        its ``ThreadPoolExecutor``) should override.
+
+        accepts ``n_steps`` (primary) or legacy ``max_steps`` as an
+        alternate to ``duration``. See ``run_policy`` for conversion rules.
+        """
+        return self.run_policy(
+            robot_name,
+            policy_provider=policy_provider,
+            policy_config=policy_config,
+            instruction=instruction,
+            duration=duration,
+            control_frequency=control_frequency,
+            action_horizon=action_horizon,
+            fast_mode=fast_mode,
+            video=video,
+            policy_object=policy_object,
+            n_steps=n_steps,
+            max_steps=max_steps,
+        )
+
+    def replay_episode(
+        self,
+        repo_id: str,
+        robot_name: str | None = None,
+        episode: int = 0,
+        root: str | None = None,
+        speed: float = 1.0,
+        action_key_map: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Replay a LeRobotDataset episode via ``PolicyRunner.replay``.
+
+        Override per backend for optimised replay (e.g. direct ctrl
+        writes) only when measured necessary.
+        """
+
+        return PolicyRunner(self).replay(
+            repo_id,
+            robot_name=robot_name,
+            episode=episode,
+            root=root,
+            speed=speed,
+            action_key_map=action_key_map,
+        )
+
+    def eval_policy(
+        self,
+        robot_name: str | None = None,
+        policy_provider: str = "mock",
+        policy_config: dict[str, Any] | None = None,
+        instruction: str = "",
+        n_episodes: int = 1,
+        max_steps: int = 300,
+        success_fn: str | None = None,
+    ) -> dict[str, Any]:
+        """Multi-episode policy evaluation via ``PolicyRunner.evaluate``.
+
+        ``robot_name`` is required - eval_policy used to silently pick
+        the first robot, which is surprising in multi-robot scenes.
+        ``n_episodes`` default lowered from 10 to 1 (callers opt in to
+        longer evals explicitly).
+        """
+        from strands_robots.policies import create_policy
+
+        if not robot_name:
+            return {
+                "status": "error",
+                "content": [{"text": "eval_policy requires 'robot_name'."}],
+            }
+        robots = self.list_robots()
+        if not robots:
+            return {"status": "error", "content": [{"text": "No robots in sim. Add one first."}]}
+        if robot_name not in robots:
+            return {
+                "status": "error",
+                "content": [{"text": f"Robot '{robot_name}' not found."}],
+            }
+        resolved_robot = robot_name
+
+        policy = create_policy(policy_provider, **(policy_config or {}))
+        policy.set_robot_state_keys(self.robot_joint_names(resolved_robot))
+
+        return PolicyRunner(self).evaluate(
+            resolved_robot,
+            policy,
+            instruction=instruction,
+            n_episodes=n_episodes,
+            max_steps=max_steps,
+            success_fn=success_fn,
+        )
+
+    def _make_run_policy_hook(self, robot_name: str, instruction: str) -> Any:
+        """Override to return an ``on_frame(step, obs, action)`` callable.
+
+        Used by backends that want to layer in recording / telemetry
+        without subclassing :class:`PolicyRunner`. Default: no hook.
+
+        Args:
+            robot_name: Robot being controlled this run.
+            instruction: Instruction passed to this run.
+
+        Returns:
+            Callable or ``None``.
+        """
+        return None
+
+    # Optional overrides (have default no-op implementations)
 
     def load_scene(self, scene_path: str) -> dict[str, Any]:
         """Load a complete scene from file. Override per backend."""
         raise NotImplementedError("load_scene not implemented by this backend")
-
-    def run_policy(self, robot_name: str, policy_provider: str = "mock", **kwargs: Any) -> dict[str, Any]:
-        """Run a policy loop in the simulation.
-
-        Orchestration shortcut: internally creates a Policy, then loops
-        ``obs → policy(obs) → send_action(action) → step()``.
-        Intentionally placed on SimEngine as a facade for agent tools
-        that need a single ``simulation(action="run_policy")`` interface.
-        Override per backend.
-        """
-        raise NotImplementedError("run_policy not implemented by this backend")
 
     def randomize(self, **kwargs: Any) -> dict[str, Any]:
         """Apply domain randomization.
@@ -217,6 +496,6 @@ class SimEngine(ABC):
         try:
             self.cleanup()
         except Exception as e:
-            # Best-effort cleanup during GC — exceptions can't propagate
+            # Best-effort cleanup during GC - exceptions can't propagate
             # from __del__ (CPython ignores them), so log for visibility.
             logger.warning("Cleanup error during __del__: %s", e)

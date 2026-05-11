@@ -1,4 +1,4 @@
-"""GR00T data configuration — typed embodiment key mappings.
+"""GR00T data configuration - typed embodiment key mappings.
 
 Provides :class:`Gr00tDataConfig` dataclasses and an ``_extends`` inheritance
 mechanism so new robot configs can be defined by overriding only what differs
@@ -59,9 +59,7 @@ class Gr00tDataConfig:
         }
 
 
-# ---------------------------------------------------------------------------
 # Config resolution with _extends inheritance
-# ---------------------------------------------------------------------------
 
 
 def _resolve_config(name: str, definitions: dict) -> Gr00tDataConfig:
@@ -88,9 +86,7 @@ def _resolve_config(name: str, definitions: dict) -> Gr00tDataConfig:
     return Gr00tDataConfig(**merged)
 
 
-# ---------------------------------------------------------------------------
 # Load configs from JSON
-# ---------------------------------------------------------------------------
 
 _CONFIG_FILE = Path(__file__).parent / "data_configs.json"
 

@@ -73,7 +73,14 @@ class SimObject:
 
 @dataclass
 class SimCamera:
-    """A camera in the simulation."""
+    """A camera in the simulation.
+
+    ``origin_robot`` (post-PR #85): when the camera was discovered inside a
+    robot's URDF during ``add_robot``, this is set to the robot's name so the
+    scene builder knows NOT to re-add the camera at the top level (it'll be
+    re-introduced via ``spec.attach(robot_spec)``). For user-added cameras
+    (via the ``add_camera`` tool action) this stays empty.
+    """
 
     name: str
     position: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
@@ -82,6 +89,7 @@ class SimCamera:
     width: int = 640
     height: int = 480
     camera_id: int = -1
+    origin_robot: str = ""
 
 
 @dataclass
@@ -104,14 +112,14 @@ class SimWorld:
     escape hatches, each with a distinct role so backend implementers know
     which to use:
 
-    * ``_model``: the physics engine's **core model handle** — the single
+    * ``_model``: the physics engine's **core model handle** - the single
       compiled/loaded representation of the scene (e.g. ``mujoco.MjModel``,
       Isaac's ``Scene``, PyBullet's body registry). Every backend has one.
-    * ``_data``: the physics engine's **core simulation state handle** —
+    * ``_data``: the physics engine's **core simulation state handle** -
       the mutable per-step state companion to ``_model``
       (e.g. ``mujoco.MjData``, Isaac's ``World``). Every backend has one.
     * ``_backend_state``: a **catch-all dict** for everything else the
-      backend needs to persist — generated XML, temp dirs, recording
+      backend needs to persist - generated XML, temp dirs, recording
       buffers, caches, etc. Prefer this over adding new fields here.
 
     All three are typed ``Any``/``dict`` so nothing leaks engine-specific
@@ -127,7 +135,7 @@ class SimWorld:
     status: SimStatus = SimStatus.IDLE
     sim_time: float = 0.0
     step_count: int = 0
-    # Engine core handles — set after the backend builds the world.
+    # Engine core handles - set after the backend builds the world.
     # Use these for the primary model/state objects only; put everything
     # else in ``_backend_state`` below.
     _model: Any = None  # Engine-specific model handle (e.g. MjModel, Scene)
@@ -138,6 +146,6 @@ class SimWorld:
     # Prefer this over adding new fields to ``SimWorld``.
     _backend_state: dict[str, Any] = field(default_factory=dict)
     # Physics state checkpoints (used by save_state/restore_state in PR #85).
-    # Kept as a top-level field — requested by @yinsong1986 during review to
+    # Kept as a top-level field - requested by @yinsong1986 during review to
     # avoid monkey-patching when ``reset()`` creates a fresh ``SimWorld``.
     _checkpoints: dict[str, Any] = field(default_factory=dict)

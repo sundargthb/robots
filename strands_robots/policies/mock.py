@@ -1,4 +1,4 @@
-"""Mock policy for testing — generates smooth sinusoidal trajectories."""
+"""Mock policy for testing - generates smooth sinusoidal trajectories."""
 
 import logging
 import math
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class MockPolicy(Policy):
-    """Mock policy for testing — generates smooth sinusoidal trajectories."""
+    """Mock policy for testing - generates smooth sinusoidal trajectories."""
 
     def __init__(self, **kwargs: Any) -> None:
         self.robot_state_keys: list[str] = []
@@ -20,6 +20,11 @@ class MockPolicy(Policy):
     @property
     def provider_name(self) -> str:
         return "mock"
+
+    @property
+    def requires_images(self) -> bool:
+        """Mock policy only consumes joint state - skip camera rendering."""
+        return False
 
     def set_robot_state_keys(self, robot_state_keys: list[str]) -> None:
         self.robot_state_keys = robot_state_keys

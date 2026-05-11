@@ -8,7 +8,7 @@ path is a valid relative path that would resolve under the search directories
     - Missing ``dir`` or ``model_xml`` keys in sim-capable robots
     - Path traversal sequences in registry entries
 
-The test does NOT require downloaded assets or GPU — it only validates the
+The test does NOT require downloaded assets or GPU - it only validates the
 registry metadata itself (directory/file names, path safety). Run it in the
 unit or integ hatch env.
 
@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pytest
 
-# ─────────────────────────────────────────────────────────────────────
+#
 # Load registry directly to avoid import side effects
-# ─────────────────────────────────────────────────────────────────────
+#
 
-_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "strands_robots" / "registry" / "robots.json"
+_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "strands_robots" / "registry" / "robots.json"
 
 
 def _load_registry() -> dict:
@@ -42,9 +42,9 @@ _SIM_ROBOTS = {name: info for name, info in _ROBOTS.items() if "asset" in info}
 _SIM_ROBOT_NAMES = list(_SIM_ROBOTS.keys())
 
 
-# ─────────────────────────────────────────────────────────────────────
+#
 # Tests for ALL robots (sim + hardware-only)
-# ─────────────────────────────────────────────────────────────────────
+#
 
 
 @pytest.mark.parametrize("name", list(_ROBOTS.keys()), ids=list(_ROBOTS.keys()))
@@ -67,9 +67,9 @@ def test_registry_resolve_via_api(name: str) -> None:
     assert info is not None, f"get_robot({name!r}) returned None"
 
 
-# ─────────────────────────────────────────────────────────────────────
+#
 # Tests for sim-capable robots only (have 'asset' key)
-# ─────────────────────────────────────────────────────────────────────
+#
 
 
 @pytest.mark.parametrize("name", _SIM_ROBOT_NAMES, ids=_SIM_ROBOT_NAMES)

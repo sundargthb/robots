@@ -1,4 +1,4 @@
-"""Tests for Gr00tPolicy — unit tests WITHOUT Isaac-GR00T installed."""
+"""Tests for Gr00tPolicy - unit tests WITHOUT Isaac-GR00T installed."""
 
 import asyncio
 from unittest.mock import MagicMock, patch
@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-msgpack = pytest.importorskip("msgpack", reason="msgpack not installed — pip install 'strands-robots[groot-service]'")
-zmq = pytest.importorskip("zmq", reason="zmq not installed — pip install 'strands-robots[groot-service]'")
+msgpack = pytest.importorskip("msgpack", reason="msgpack not installed - pip install 'strands-robots[groot-service]'")
+zmq = pytest.importorskip("zmq", reason="zmq not installed - pip install 'strands-robots[groot-service]'")
 
 # All tests in this file require groot-service extras
 pytestmark = pytest.mark.skipif(
@@ -28,9 +28,9 @@ from strands_robots.policies.groot.policy import (  # noqa: E402
     _to_video_batch,
 )
 
-# ---------------------------------------------------------------------------
+# (section)
 # Helpers
-# ---------------------------------------------------------------------------
+# (section)
 
 _KNOWN_DOF = {
     "single_arm": 5,
@@ -93,9 +93,9 @@ def _make_policy(data_config="so100", version="n1.6", obs_mapping=None, action_m
     return p
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Construction
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestConstruction:
@@ -156,7 +156,7 @@ class TestConstruction:
             assert Gr00tPolicy(data_config=name)._mode == "service"
 
     def test_no_denoising_steps_param(self):
-        """denoising_steps was removed from __init__ — kwargs swallows it."""
+        """denoising_steps was removed from __init__ - kwargs swallows it."""
         p = Gr00tPolicy(denoising_steps=8)
         assert p._mode == "service"  # no error, just ignored via **kwargs
 
@@ -166,9 +166,9 @@ class TestConstruction:
         p.set_robot_state_keys(["a", "b"])  # should not raise
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Version detection
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestVersion:
@@ -211,7 +211,7 @@ class TestVersion:
     def test_detect_n17(self):
         """N1.7 is detected when the ``gr00t.model.gr00t_n1d7`` subpackage exists.
 
-        N1.6 and N1.7 share ``gr00t.policy.gr00t_policy`` — so we need a
+        N1.6 and N1.7 share ``gr00t.policy.gr00t_policy`` - so we need a
         version-specific probe.  ``gr00t_n1d7`` was introduced in N1.7.
         """
         import strands_robots.policies.groot.policy as pm
@@ -261,7 +261,7 @@ class TestVersion:
         orig = pm._GROOT_VERSION
         pm._GROOT_VERSION = None
         try:
-            # All three probes return a spec—N1.7 must come first.
+            # All three probes return a spec - N1.7 must come first.
             with patch("importlib.util.find_spec", return_value=MagicMock()):
                 assert _detect_groot_version(force=True) == "n1.7"
         finally:
@@ -286,9 +286,9 @@ class TestVersion:
             pm._GROOT_VERSION = orig
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # ObservationMapping
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestObsMapping:
@@ -320,9 +320,9 @@ class TestObsMapping:
             ObservationMapping(language_key="nope").validate(GR1_MMC)
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # ActionMapping
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestActionMapping:
@@ -337,9 +337,9 @@ class TestActionMapping:
             ActionMapping(actions={"nope": "j"}).validate(GR1_MMC)
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Parsing
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestParsing:
@@ -366,9 +366,9 @@ class TestParsing:
         assert m.actions == {"left_arm": "j", "left_hand": "g"}
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Auto-inference
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestAutoInfer:
@@ -386,9 +386,9 @@ class TestAutoInfer:
         assert m.actions["single_arm"] == "single_arm"
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Shape helpers
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestShapes:
@@ -416,7 +416,7 @@ class TestShapes:
         """Should only look at keys in the video_keys set."""
         obs = {
             "cam": np.zeros((128, 128, 3)),
-            "state_3d": np.zeros((10, 10, 3)),  # 3D state — should NOT match
+            "state_3d": np.zeros((10, 10, 3)),  # 3D state - should NOT match
         }
         assert _reference_video_shape(obs, video_keys={"cam"}) == (128, 128, 3)
 
@@ -434,9 +434,9 @@ class TestShapes:
         assert _reference_video_shape(obs, video_keys=None) == (128, 128, 3)
 
 
-# ---------------------------------------------------------------------------
-# _prepare_observation — nested dict format
-# ---------------------------------------------------------------------------
+# (section)
+# _prepare_observation - nested dict format
+# (section)
 
 
 class TestPrepareObs:
@@ -484,7 +484,7 @@ class TestPrepareObs:
                 video={"cam": "webcam"}, state={"arm": "single_arm"}, language_key="annotation.human.task_description"
             ),
         )
-        # Clear DOF for gripper — simulate unknown
+        # Clear DOF for gripper - simulate unknown
         p._model_state_dof = {"single_arm": 5}
         b = p._prepare_observation({"cam": np.zeros((64, 64, 3), dtype=np.uint8), "arm": np.zeros(5)}, "t")
         # gripper DOF unknown → should NOT be in state dict
@@ -492,9 +492,9 @@ class TestPrepareObs:
         assert "single_arm" in b["state"]
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # _unpack_actions
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestUnpackActions:
@@ -512,9 +512,9 @@ class TestUnpackActions:
         assert _make_policy(action_mapping=ActionMapping())._unpack_actions({}) == []
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Full local flow
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestLocalFlow:
@@ -567,9 +567,9 @@ class TestLocalFlow:
             p._local_get_actions({}, "t")
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # get_actions routing
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestGetActions:
@@ -598,9 +598,9 @@ class TestGetActions:
         assert len(acts) == 16
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Service observation + action unpack
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestServiceObs:
@@ -658,9 +658,9 @@ class TestServiceUnpackWithMapping:
         assert "single_arm" in result[0]
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Exports
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestExports:

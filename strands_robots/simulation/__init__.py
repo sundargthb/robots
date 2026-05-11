@@ -1,15 +1,25 @@
-"""Strands Robots Simulation — multi-backend simulation framework.
+"""Strands Robots Simulation - multi-backend simulation framework.
 
 Architecture::
 
     simulation/
-    ├── __init__.py          ← this file (re-exports, lazy loading)
-    ├── base.py              ← SimEngine ABC
-    ├── factory.py           ← create_simulation() + backend registration
-    ├── models.py            ← shared dataclasses (SimWorld, SimRobot, ...)
-    └── model_registry.py    ← URDF/MJCF resolution (shared across backends)
-
-    # MuJoCo backend added in subsequent PRs.
+    ├ __init__.py          ← this file (re-exports, lazy loading)
+    ├ base.py              ← SimEngine ABC
+    ├ factory.py           ← create_simulation() + backend registration
+    ├ models.py            ← shared dataclasses (SimWorld, SimRobot, ...)
+    ├ model_registry.py    ← URDF/MJCF resolution (shared across backends)
+    └ mujoco/              ← MuJoCo CPU backend
+        ├ __init__.py
+        ├ backend.py       ← lazy mujoco import + GL config
+        ├ spec_builder.py  ← MjSpec-based scene builder/mutator
+        ├ physics.py       ← advanced physics (raycasting, jacobians, forces)
+        ├ scene_ops.py     ← live scene mutation via spec.recompile()
+        ├ rendering.py     ← render RGB/depth, observations
+        ├ policy_runner.py ← run_policy, eval_policy, replay
+        ├ randomization.py ← domain randomization
+        ├ recording.py     ← LeRobotDataset recording
+        ├ tool_spec.json   ← AgentTool input schema
+        └ simulation.py    ← Simulation (AgentTool orchestrator)
 
 Usage::
 
@@ -39,7 +49,7 @@ Future backends::
 import importlib as _importlib
 from typing import Any
 
-# --- Light imports (no heavy deps — stdlib + dataclasses only) ---
+# Light imports (no heavy deps - stdlib + dataclasses only)
 from strands_robots.simulation.base import SimEngine
 from strands_robots.simulation.factory import (
     create_simulation,
@@ -62,10 +72,15 @@ from strands_robots.simulation.models import (
     TrajectoryStep,
 )
 
-# --- Heavy imports (lazy — loaded when mujoco backend is available) ---
-# MuJoCo-specific lazy imports will be added when the mujoco/ subpackage
-# is introduced. For now, only the lightweight foundation is available.
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {}
+# Heavy imports (lazy - need strands SDK + mujoco)
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    "Simulation": ("strands_robots.simulation.mujoco.simulation", "Simulation"),
+    "MuJoCoSimulation": ("strands_robots.simulation.mujoco.simulation", "Simulation"),
+    "SpecBuilder": ("strands_robots.simulation.mujoco.spec_builder", "SpecBuilder"),
+    "_configure_gl_backend": ("strands_robots.simulation.mujoco.backend", "_configure_gl_backend"),
+    "_ensure_mujoco": ("strands_robots.simulation.mujoco.backend", "_ensure_mujoco"),
+    "_is_headless": ("strands_robots.simulation.mujoco.backend", "_is_headless"),
+}
 
 
 __all__ = [
@@ -75,9 +90,9 @@ __all__ = [
     "create_simulation",
     "list_backends",
     "register_backend",
-    # Default backend alias (available when mujoco backend is installed)
-    # "Simulation",
-    # "MuJoCoSimulation",
+    # Default backend alias
+    "Simulation",
+    "MuJoCoSimulation",
     # Shared dataclasses
     "SimStatus",
     "SimRobot",
@@ -85,8 +100,8 @@ __all__ = [
     "SimCamera",
     "SimWorld",
     "TrajectoryStep",
-    # MuJoCo builder (available when mujoco backend is installed)
-    # "MJCFBuilder",
+    # MuJoCo scene builder (MjSpec-based, replaces MJCFBuilder)
+    "SpecBuilder",
     # Model registry
     "register_urdf",
     "resolve_model",
@@ -108,4 +123,4 @@ def __getattr__(name: str) -> Any:
 
 # NOTE: MuJoCo GL backend configuration lives in the top-level
 # strands_robots/__init__.py to ensure it runs before any `import mujoco`.
-# Do NOT duplicate it here — see PR #86 for the canonical location.
+# Do NOT duplicate it here - see PR #86 for the canonical location.

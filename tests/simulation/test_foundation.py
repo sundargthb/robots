@@ -1,4 +1,4 @@
-"""Tests for simulation foundation — models, ABC, factory, model_registry.
+"""Tests for simulation foundation - models, ABC, factory, model_registry.
 
 These tests verify the lightweight simulation abstractions without
 requiring MuJoCo or any heavy dependencies.
@@ -22,7 +22,7 @@ from strands_robots.simulation.models import (
     TrajectoryStep,
 )
 
-# ── Shared fixtures ──────────────────────────────────────────────
+# Shared fixtures
 
 
 def _make_dummy_engine_class() -> type[SimEngine]:
@@ -66,6 +66,12 @@ def _make_dummy_engine_class() -> type[SimEngine]:
         def remove_robot(self, name: str) -> dict[str, Any]:
             return {}
 
+        def list_robots(self) -> list[str]:
+            return []
+
+        def robot_joint_names(self, robot_name: str) -> list[str]:
+            return []
+
         def add_object(
             self,
             name: str,
@@ -84,7 +90,7 @@ def _make_dummy_engine_class() -> type[SimEngine]:
         def remove_object(self, name: str) -> dict[str, Any]:
             return {}
 
-        def get_observation(self, robot_name: str | None = None, camera_name: str | None = None) -> dict[str, Any]:
+        def get_observation(self, robot_name: str | None = None, *, skip_images: bool = False) -> dict[str, Any]:
             return {}
 
         def send_action(self, action: dict[str, Any], robot_name: str | None = None, n_substeps: int = 1) -> None:
@@ -104,7 +110,7 @@ def dummy_engine_class() -> type[SimEngine]:
     return _make_dummy_engine_class()
 
 
-# ── ABC Tests ────────────────────────────────────────────────────
+# ABC Tests
 
 
 class TestSimEngine:
@@ -124,6 +130,8 @@ class TestSimEngine:
             "get_state",
             "add_robot",
             "remove_robot",
+            "list_robots",
+            "robot_joint_names",
             "add_object",
             "remove_object",
             "get_observation",
@@ -133,12 +141,15 @@ class TestSimEngine:
         assert expected == abstract_methods
 
     def test_optional_methods_raise_not_implemented(self, dummy_engine_class):
-        """Optional methods on a concrete subclass raise NotImplementedError."""
+        """Optional methods on a concrete subclass raise NotImplementedError.
+
+        Note: ``run_policy`` / ``replay_episode`` / ``eval_policy`` used to
+        be in this set but are now concrete facades on the ABC that
+        delegate to the backend-agnostic ``PolicyRunner``.
+        """
         d = dummy_engine_class()
         with pytest.raises(NotImplementedError):
             d.load_scene("x")
-        with pytest.raises(NotImplementedError):
-            d.run_policy("x")
         with pytest.raises(NotImplementedError):
             d.randomize()
         with pytest.raises(NotImplementedError):
@@ -157,11 +168,11 @@ class TestSimEngine:
         assert cleaned["flag"] is True
 
 
-# ── Factory Tests ────────────────────────────────────────────────
+# Factory Tests
 
 
 class TestSimulationFactory:
-    """Test backend registration and creation — full round-trip."""
+    """Test backend registration and creation - full round-trip."""
 
     def test_list_backends_includes_mujoco(self):
         backends = list_backends()
@@ -185,7 +196,7 @@ class TestSimulationFactory:
         with pytest.raises(ValueError, match="conflicts with built-in"):
             register_backend("custom_phys", lambda: dummy_engine_class, aliases=["mj"])
 
-    # ── Regression tests for alias-shadowing bug (PR #84 review) ──
+    # Regression tests for alias-shadowing bug (PR #84 review)
 
     def test_register_rejects_builtin_alias_as_name(self, dummy_engine_class):
         """Cannot register a new backend under a built-in alias name.
@@ -214,7 +225,7 @@ class TestSimulationFactory:
         """force=True bypasses all conflict checks (escape hatch)."""
         # Should NOT raise
         register_backend("mj", lambda: dummy_engine_class, force=True)
-        # Clean up — put the real mj alias back by re-importing
+        # Clean up - put the real mj alias back by re-importing
         import importlib
 
         from strands_robots.simulation import factory
@@ -222,7 +233,7 @@ class TestSimulationFactory:
         importlib.reload(factory)
 
 
-# ── Model Registry Tests ─────────────────────────────────────────
+# Model Registry Tests
 
 
 class TestModelRegistry:
@@ -237,7 +248,7 @@ class TestModelRegistry:
         assert len(models) > 100
 
     def test_register_and_resolve_urdf(self, tmp_path):
-        """Register a URDF, resolve it back — full round-trip."""
+        """Register a URDF, resolve it back - full round-trip."""
         from strands_robots.simulation.model_registry import register_urdf, resolve_urdf
 
         urdf_file = tmp_path / "robot.urdf"
@@ -255,14 +266,14 @@ class TestModelRegistry:
         assert "list_test_bot" in urdfs
 
 
-# ── Dataclass Behavioral Tests ───────────────────────────────────
+# Dataclass Behavioral Tests
 
 
 class TestSimModelsUsage:
     """Test that simulation models behave correctly in real usage patterns."""
 
     def test_sim_world_tracks_robots(self):
-        """SimWorld can add robots and objects — simulates real world setup."""
+        """SimWorld can add robots and objects - simulates real world setup."""
         world = SimWorld()
         robot = SimRobot(name="so100", urdf_path="/p")
         world.robots["so100"] = robot

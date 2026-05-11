@@ -5,7 +5,7 @@ The ``strands_robots.tools.download_assets`` tool is a thin ``@tool`` wrapper
 that delegates to :func:`download_robots` here.
 
 Strategy (in order of preference):
-    1. ``robot_descriptions`` package — recommended by MuJoCo Menagerie.
+    1. ``robot_descriptions`` package - recommended by MuJoCo Menagerie.
     2. Shallow ``git clone`` fallback for Menagerie robots.
     3. Custom GitHub repos for non-Menagerie robots.
 
@@ -40,7 +40,7 @@ MENAGERIE_REPO = "https://github.com/google-deepmind/mujoco_menagerie.git"
 _ALLOWED_CLONE_URL_RE = re.compile(r"^https://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+\.git$")
 
 
-# ── robot_descriptions integration ────────────────────────────────────
+# robot_descriptions integration
 
 
 def _robot_descriptions_available() -> bool:
@@ -102,10 +102,7 @@ def _resolve_robot_descriptions_module(name: str, info: dict) -> str | None:
     return None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────
-
-
-#: Alias for backward compatibility — use :func:`strands_robots.utils.get_assets_dir`.
+#: Alias for backward compatibility - use :func:`strands_robots.utils.get_assets_dir`.
 get_user_assets_dir = get_assets_dir
 
 
@@ -151,7 +148,7 @@ def _get_source(info: dict[str, Any] | None) -> dict[str, Any]:
 def _shallow_clone(repo_url: str, dest: str, *, timeout: int = 120) -> None:
     """Shallow-clone *repo_url* into *dest*.
 
-    Only HTTPS ``github.com`` URLs are accepted — ``ssh://``, ``git://``,
+    Only HTTPS ``github.com`` URLs are accepted - ``ssh://``, ``git://``,
     ``file://``, and other schemes are rejected to prevent command-injection
     and SSRF risks.
 
@@ -174,7 +171,7 @@ def _shallow_clone(repo_url: str, dest: str, *, timeout: int = 120) -> None:
 # Filenames/patterns that are safe to strip from an upstream source tree before
 # we copy it into the user's asset cache.  Filtering at *copy* time (rather than
 # deleting afterwards) means we never touch files that may already exist in *dst*
-# — which matters when the user keeps notes/README alongside assets.
+# - which matters when the user keeps notes/README alongside assets.
 _COPY_CLEAN_SKIP = frozenset({"README.md", "LICENSE", "CHANGELOG.md"})
 _COPY_CLEAN_SUFFIX = (".png", ".jpg", ".jpeg")
 
@@ -193,9 +190,6 @@ def _copy_and_clean(src: Path, dst: Path) -> None:
         ]
 
     shutil.copytree(str(src), str(dst), dirs_exist_ok=True, ignore=_ignore)
-
-
-# ── Download backends ─────────────────────────────────────────────────
 
 
 def _download_via_robot_descriptions(robots: dict[str, dict], dest_dir: Path) -> dict[str, str]:
@@ -234,9 +228,9 @@ def _download_via_robot_descriptions(robots: dict[str, dict], dest_dir: Path) ->
                 if expected_xml.exists():
                     results[name] = "downloaded"
                     continue
-                # Stale symlink — remove and re-download via git
+                # Stale symlink - remove and re-download via git
                 dst.unlink()
-                results[name] = f"failed: stale symlink — {info['asset']['model_xml']} not found in {package_path}"
+                results[name] = f"failed: stale symlink - {info['asset']['model_xml']} not found in {package_path}"
                 continue
             if dst.exists() or dst.is_symlink():
                 dst.unlink() if dst.is_symlink() else shutil.rmtree(str(dst))
@@ -251,7 +245,7 @@ def _download_via_robot_descriptions(robots: dict[str, dict], dest_dir: Path) ->
             if not expected_xml.exists():
                 logger.warning(
                     "robot_descriptions module '%s' linked for %s but "
-                    "expected XML '%s' not found — falling back to git",
+                    "expected XML '%s' not found - falling back to git",
                     module_name,
                     name,
                     info["asset"]["model_xml"],
@@ -261,7 +255,7 @@ def _download_via_robot_descriptions(robots: dict[str, dict], dest_dir: Path) ->
                 else:
                     shutil.rmtree(str(dst), ignore_errors=True)
                 results[name] = (
-                    f"failed: XML mismatch — module '{module_name}' does not contain {info['asset']['model_xml']}"
+                    f"failed: XML mismatch - module '{module_name}' does not contain {info['asset']['model_xml']}"
                 )
                 continue
 
@@ -333,7 +327,7 @@ def _download_from_github(name: str, info: dict, dest_dir: Path) -> str:
             return f"failed: {exc}"
 
 
-# ── Orchestrator ──────────────────────────────────────────────────────
+# Orchestrator
 
 
 def auto_download_robot(name: str, info: dict[str, Any]) -> bool:
@@ -379,20 +373,20 @@ def download_robots(
     """Download robot model assets from their respective sources.
 
     Strategy (in order of preference):
-      1. ``robot_descriptions`` package — recommended by MuJoCo Menagerie.
+      1. ``robot_descriptions`` package - recommended by MuJoCo Menagerie.
       2. Shallow ``git clone`` fallback for Menagerie robots.
       3. Custom GitHub repos for non-Menagerie robots.
 
     Args:
         names: Robot names to download (``None`` = all sim robots).
-        category: Filter by category (arm, humanoid, mobile, …).
+        category: Filter by category (arm, humanoid, mobile, ...).
         force: Re-download even if present.
 
     Returns:
         Dict with downloaded/skipped/failed counts, names, and details.
     """
     dest_dir = get_user_assets_dir()
-    # Filter None values — get_robot() can return None for unknown names
+    # Filter None values - get_robot() can return None for unknown names
     all_sim: dict[str, dict[str, Any]] = {
         r["name"]: info for r in registry_list_robots(mode="sim") if (info := get_robot(r["name"])) is not None
     }

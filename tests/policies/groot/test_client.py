@@ -1,4 +1,4 @@
-"""Tests for strands_robots.policies.groot.client — ZMQ serialization and client.
+"""Tests for strands_robots.policies.groot.client - ZMQ serialization and client.
 
 Covers: MsgSerializer roundtrips, Gr00tInferenceClient construction, api_token
 handling, and error paths.
@@ -12,16 +12,16 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-msgpack = pytest.importorskip("msgpack", reason="msgpack not installed — pip install 'strands-robots[groot-service]'")
-zmq = pytest.importorskip("zmq", reason="zmq not installed — pip install 'strands-robots[groot-service]'")
+msgpack = pytest.importorskip("msgpack", reason="msgpack not installed - pip install 'strands-robots[groot-service]'")
+zmq = pytest.importorskip("zmq", reason="zmq not installed - pip install 'strands-robots[groot-service]'")
 
 # E402: importorskip must execute before these imports to skip the module cleanly.
 from strands_robots.policies.groot.client import Gr00tInferenceClient, MsgSerializer  # noqa: E402
 from strands_robots.policies.groot.data_config import ModalityConfig  # noqa: E402
 
-# ---------------------------------------------------------------------------
+# (section)
 # MsgSerializer
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestMsgSerializer:
@@ -73,7 +73,7 @@ class TestMsgSerializer:
         Our lightweight client-side dataclass only tracks ``delta_indices`` and
         ``modality_keys``.  Unknown fields in the wire payload must be silently
         dropped so clients don't break when NVIDIA adds new metadata in future
-        N1.x releases.  This was discovered live against GR00T-N1.7-3B — the
+        N1.x releases.  This was discovered live against GR00T-N1.7-3B - the
         server sends ``sin_cos_embedding_keys``, ``mean_std_embedding_keys``,
         and ``action_configs`` on every response.
         """
@@ -129,9 +129,9 @@ class TestMsgSerializer:
         assert result["num"] == 42
 
 
-# ---------------------------------------------------------------------------
-# Gr00tInferenceClient — construction & api_token
-# ---------------------------------------------------------------------------
+# (section)
+# Gr00tInferenceClient - construction & api_token
+# (section)
 
 
 class TestGr00tInferenceClient:
@@ -251,9 +251,9 @@ class TestGr00tInferenceClient:
         assert sent_data[0]["data"] == {"obs": "test"}
 
 
-# ---------------------------------------------------------------------------
+# (section)
 # Dependency check
-# ---------------------------------------------------------------------------
+# (section)
 
 
 class TestZmqDeps:

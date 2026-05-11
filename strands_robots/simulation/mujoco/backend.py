@@ -1,0 +1,185 @@
+"""MuJoCo lazy import and GL backend configuration."""
+
+import ctypes
+import logging
+import os
+import subprocess
+import sys
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_mujoco = None
+_mujoco_viewer = None
+
+
+def _is_headless() -> bool:
+    """Detect if running in a headless environment (no display server).
+
+    Returns True on Linux when no DISPLAY or WAYLAND_DISPLAY is set,
+    which means GLFW-based rendering will fail.
+
+    Windows and macOS are always False because MuJoCo uses native
+    windowing backends (WGL on Windows, CGL on macOS) that support
+    offscreen rendering without X11/Wayland. The EGL/OSMesa fallback
+    is Linux-specific.
+    """
+    if sys.platform != "linux":
+        return False
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return False
+    return True
+
+
+def _configure_gl_backend() -> None:  # noqa: C901
+    """Auto-configure MuJoCo's OpenGL backend for headless environments.
+
+    MuJoCo reads MUJOCO_GL at import time to select the OpenGL backend:
+    - "egl"    - EGL (GPU-accelerated offscreen, requires libEGL + NVIDIA driver)
+    - "osmesa" - OSMesa (CPU software rendering, slower but always works)
+    - "glfw"   - GLFW (default, requires X11/Wayland display server)
+
+    This function MUST be called before `import mujoco`. Setting MUJOCO_GL
+    after import has no effect - the backend is locked at import time.
+
+    Never overrides a user-set MUJOCO_GL value.
+    """
+    if os.environ.get("MUJOCO_GL"):
+        logger.debug(f"MUJOCO_GL already set to '{os.environ['MUJOCO_GL']}', respecting user config")
+        return
+
+    if not _is_headless():
+        return
+
+    # Headless Linux - probe for EGL first (GPU-accelerated), then fall back to OSMesa (CPU)
+    try:
+        ctypes.cdll.LoadLibrary("libEGL.so.1")
+        os.environ["MUJOCO_GL"] = "egl"
+        logger.info("Headless environment detected - using MUJOCO_GL=egl (GPU-accelerated offscreen)")
+        return
+    except OSError:
+        pass
+
+    try:
+        ctypes.cdll.LoadLibrary("libOSMesa.so")
+        os.environ["MUJOCO_GL"] = "osmesa"
+        logger.info("Headless environment detected - using MUJOCO_GL=osmesa (CPU software rendering)")
+        return
+    except OSError:
+        pass
+
+    logger.warning(
+        "Headless environment detected but neither EGL nor OSMesa found. "
+        "MuJoCo rendering will likely fail. Install one of:\n"
+        "  GPU: apt-get install libegl1-mesa-dev  (or NVIDIA driver provides libEGL)\n"
+        "  CPU: apt-get install libosmesa6-dev\n"
+        "Then set: export MUJOCO_GL=egl  (or osmesa)"
+    )
+
+
+def _ensure_mujoco() -> "Any":
+    """Lazy import MuJoCo to avoid hard dependency.
+
+    Auto-configures the OpenGL backend for headless environments before
+    importing mujoco, since MUJOCO_GL must be set at import time.
+
+    Uses require_optional() for consistent dependency management across
+    the strands-robots package.
+    """
+    global _mujoco, _mujoco_viewer
+    if _mujoco is None:
+        _configure_gl_backend()
+        from strands_robots.utils import require_optional
+
+        _mujoco = require_optional(
+            "mujoco",
+            pip_install="mujoco",
+            extra="sim-mujoco",
+            purpose="MuJoCo simulation",
+        )
+    if _mujoco_viewer is None and not _is_headless():
+        try:
+            import mujoco.viewer as viewer
+
+            _mujoco_viewer = viewer
+        except ImportError:
+            pass
+    return _mujoco
+
+
+_rendering_available: bool | None = None
+
+
+def _can_render() -> bool:
+    """Check if MuJoCo offscreen rendering is available.
+
+    Probes once by creating a minimal Renderer in a subprocess. Result is cached.
+    Returns False on headless environments without EGL/OSMesa.
+
+    On headless Linux, if MUJOCO_GL is not set after _configure_gl_backend()
+    ran, it means neither EGL nor OSMesa is available. In that case the
+    default GLFW backend would be used, which calls glfw.init() - abort()
+    at the C level (SIGABRT), killing the entire process before Python can
+    catch the error. We short-circuit to False to avoid the fatal probe.
+
+    When MUJOCO_GL IS set (e.g. "egl"), the library may still be dysfunctional
+    (libEGL.so.1 loadable but no GPU/driver). In that case mj.Renderer() aborts
+    at the C level too. We run the probe in a subprocess so a SIGABRT in the
+    child doesn't kill the host process.
+    """
+    global _rendering_available
+    if _rendering_available is not None:
+        return _rendering_available
+
+    # Guard: on headless systems without an offscreen GL backend configured,
+    # mj.Renderer() will use GLFW which triggers a C-level abort (SIGABRT).
+    # Skip the probe entirely - rendering is impossible anyway.
+    if _is_headless() and not os.environ.get("MUJOCO_GL"):
+        _rendering_available = False
+        logger.warning(
+            "Headless environment without EGL/OSMesa - rendering disabled. "
+            "Physics and joint observations will still work. "
+            "Install libegl1-mesa-dev or libosmesa6-dev for camera rendering."
+        )
+        return False
+
+    # Probe rendering in a subprocess to survive C-level aborts (SIGABRT).
+    # On some CI environments, libEGL.so.1 is loadable but non-functional -
+    # mj.Renderer() triggers a fatal abort that kills the entire process.
+    # By running the probe in a child process, we detect the failure safely.
+    probe_script = (
+        "import mujoco;"
+        "m=mujoco.MjModel.from_xml_string('<mujoco><worldbody/></mujoco>');"
+        "r=mujoco.Renderer(m,height=1,width=1);"
+        "r.close()"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            capture_output=True,
+            timeout=10,
+            env=os.environ.copy(),
+        )
+        if result.returncode == 0:
+            _rendering_available = True
+            logger.info("MuJoCo rendering available (subprocess probe passed)")
+        else:
+            _rendering_available = False
+            stderr = result.stderr.decode(errors="replace").strip()
+            # Truncate for readability
+            if len(stderr) > 200:
+                stderr = stderr[:200] + "..."
+            logger.warning(
+                "MuJoCo rendering unavailable (subprocess probe failed, rc=%d): %s. "
+                "Physics/policy will work, but render/camera observations will be skipped.",
+                result.returncode,
+                stderr,
+            )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _rendering_available = False
+        logger.warning(
+            "MuJoCo rendering probe timed out or failed to run: %s. Rendering disabled.",
+            e,
+        )
+
+    return _rendering_available  # type: ignore[return-value]

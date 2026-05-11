@@ -1,0 +1,850 @@
+"""Rendering mixin - render, render_depth, get_contacts, observation helpers."""
+
+import io
+import logging
+from typing import TYPE_CHECKING, Any
+
+from strands_robots.simulation.mujoco.backend import _can_render, _ensure_mujoco
+
+logger = logging.getLogger(__name__)
+
+
+class RenderingMixin:
+    """Rendering + observation helpers mixed into ``Simulation``.
+
+    Owns ``render``, ``render_depth``, ``render_all``, ``get_contacts``, and
+    the low-level ``_apply_sim_action`` (MuJoCo ``ctrl[]`` write + mj_step).
+
+    **Coupling** (see simulation.py top-level docstring): mixin reaches
+    into ``self._world``, ``self._renderer_tls``, ``self._renderer_model``,
+    ``self.default_width`` / ``self.default_height``, ``self._lock`` and
+    ``self._viewer_handle``. ``TYPE_CHECKING`` stubs below exist so mypy
+    accepts those lookups; they are a documentary contract, not an
+    enforceable protocol.
+
+    Thread-safety note: MuJoCo ``Renderer`` uses thread-local GL contexts
+    (CGL on macOS, GLX on Linux). A renderer created on thread A cannot be
+    reused from thread B - we keep one per-thread via ``_renderer_tls``.
+    """
+
+    if TYPE_CHECKING:
+        from strands_robots.simulation.models import SimWorld
+
+        _world: "SimWorld | None"
+
+        _renderer_model: Any
+        _renderer_tls: Any  # threading.local() - per-thread renderer dict
+        default_width: int
+        default_height: int
+        _lock: Any  # threading.RLock from Simulation
+
+    def _validate_render_dims(self, width: int, height: int) -> dict[str, Any] | None:
+        """reject non-positive render dims; convert MuJoCo's framebuffer
+        overflow to a plain-English message that tells the LLM the actual cap.
+        """
+        if not isinstance(width, int) or not isinstance(height, int):
+            return {
+                "status": "error",
+                "content": [
+                    {"text": f"render: width/height must be int, got {type(width).__name__}/{type(height).__name__}."}
+                ],
+            }
+        if width <= 0 or height <= 0:
+            return {
+                "status": "error",
+                "content": [{"text": f"render: width and height must be > 0, got {width}x{height}."}],
+            }
+        # Hard absolute ceiling regardless of model config (OOM protection).
+        _ABS_MAX = 4096
+        if width > _ABS_MAX or height > _ABS_MAX:
+            return {
+                "status": "error",
+                "content": [
+                    {
+                        "text": f"render: {width}x{height} exceeds absolute maximum offscreen framebuffer cap ({_ABS_MAX}x{_ABS_MAX}). Lower width/height or set offwidth/offheight in the model."
+                    }
+                ],
+            }
+        if self._world is not None and self._world._model is not None:
+            max_w = int(getattr(self._world._model.vis.global_, "offwidth", 1280))
+            max_h = int(getattr(self._world._model.vis.global_, "offheight", 960))
+            if width > max_w or height > max_h:
+                return {
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                f"render: requested {width}x{height} exceeds the offscreen "
+                                f"framebuffer cap ({max_w}x{max_h}). Lower width/height or "
+                                f"rebuild the model with a larger <global offwidth='...' offheight='...'/>."
+                            )
+                        }
+                    ],
+                }
+        return None
+
+    def _get_renderer(self, width: int, height: int):
+        """Get a cached MuJoCo renderer, creating one only if needed.
+
+        Returns None if rendering is unavailable (headless without EGL/OSMesa).
+        Callers must handle None return.
+
+        Thread-safety: renderers are cached per-thread via ``threading.local``
+        because ``mujoco.Renderer`` binds a GL context to the thread that
+        creates it (CGL on macOS, GLX on Linux). Sharing renderers across
+        threads would cause ``cgl.free()`` segfaults at cleanup time.
+        """
+        if not _can_render():
+            return None
+        mj = _ensure_mujoco()
+        assert self._world is not None  # callers must check
+
+        # Get or create per-thread renderer dict
+        renderers = getattr(self._renderer_tls, "renderers", None)
+        if renderers is None:
+            renderers = {}
+            self._renderer_tls.renderers = renderers
+            self._renderer_tls.model = None
+
+        # Invalidate this thread's cache if model changed (e.g. after recompile)
+        if self._renderer_tls.model is not self._world._model:
+            renderers.clear()
+            self._renderer_tls.model = self._world._model
+            # Keep the per-instance marker for compatibility with any remaining
+            # read paths that checked self._renderer_model.
+            self._renderer_model = self._world._model
+
+        key = (width, height)
+        if key not in renderers:
+            # Bound the cache: max 4 resolutions per thread. Evict oldest
+            # (first-inserted) to prevent unbounded GL context accumulation.
+            _MAX_RENDERERS_PER_THREAD = 4
+            if len(renderers) >= _MAX_RENDERERS_PER_THREAD:
+                oldest_key = next(iter(renderers))
+                try:
+                    renderers[oldest_key].close()
+                except Exception:
+                    pass
+                del renderers[oldest_key]
+            renderers[key] = mj.Renderer(self._world._model, height=height, width=width)
+        return renderers[key]
+
+    def _get_sim_observation(self, robot_name: str, *, skip_images: bool = False) -> dict[str, Any]:
+        """Get observation from sim: joint state + cameras (unless skipped).
+
+        Implements :meth:`SimEngine.get_observation`'s schema.
+
+        Multi-robot note: when the injected robot XML was namespaced
+        (e.g. ``arm0/shoulder_pan`` in MuJoCo to allow multiple same-config
+        robots), we look up the prefixed MuJoCo name but return the short
+        name in the observation dict so the policy sees a stable, config-level
+        schema regardless of how many robots are in the scene.
+        """
+        mj = _ensure_mujoco()
+        assert self._world is not None  # callers must check
+        model, data = self._world._model, self._world._data
+        robot = self._world.robots[robot_name]
+        pfx = robot.namespace or ""
+
+        obs = {}
+        for jnt_name in robot.joint_names:
+            # Try namespaced name first (multi-robot), fall back to raw.
+            lookup = pfx + jnt_name if pfx else jnt_name
+            jnt_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, lookup)
+            if jnt_id < 0 and pfx:
+                jnt_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, jnt_name)
+            if jnt_id >= 0:
+                obs[jnt_name] = float(data.qpos[model.jnt_qposadr[jnt_id]])
+
+        if skip_images:
+            return obs
+
+        # Render every camera defined on the model plus any python-side cameras.
+        # Individual camera failures are logged but do not drop joint state.
+        cameras_to_render = [mj.mj_id2name(model, mj.mjtObj.mjOBJ_CAMERA, i) for i in range(model.ncam)]
+        for pycam_name in self._world.cameras:
+            if pycam_name not in cameras_to_render:
+                cameras_to_render.append(pycam_name)
+
+        for cname in cameras_to_render:
+            if not cname:
+                continue
+            cam_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_CAMERA, cname)
+            cam_info = self._world.cameras.get(cname)
+            h = cam_info.height if cam_info else self.default_height
+            w = cam_info.width if cam_info else self.default_width
+            try:
+                renderer = self._get_renderer(w, h)
+                if renderer is None:
+                    continue
+                if cam_id >= 0:
+                    renderer.update_scene(data, camera=cam_id)
+                else:
+                    renderer.update_scene(data)
+                obs[cname] = renderer.render().copy()
+            except (RuntimeError, ValueError) as e:
+                # Individual camera failure shouldn't stop joint state collection.
+                # Common cause: camera ID invalid after scene recompile.
+                logger.debug("Camera render failed for %s: %s", cname, e)
+
+        return obs
+
+    def _apply_sim_action(self, robot_name: str, action_dict: dict[str, Any], n_substeps: int = 1) -> None:
+        """Apply action dict to sim (same interface as robot.send_action).
+
+        Multi-robot note: action keys are *short* names (e.g. ``shoulder_pan``).
+        We look up the namespaced MuJoCo actuator/joint name for this
+        specific ``robot_name`` so the same action dict routes to the right
+        physical actuator when multiple same-config robots exist.
+        """
+        mj = _ensure_mujoco()
+        assert self._world is not None  # callers must check
+        model, data = self._world._model, self._world._data
+        robot = self._world.robots.get(robot_name)
+        pfx = robot.namespace if robot else ""
+
+        def _lookup(obj_type: Any, name: str) -> int:
+            """Try namespaced lookup first, fall back to raw."""
+            if pfx:
+                i = mj.mj_name2id(model, obj_type, pfx + name)
+                if i >= 0:
+                    return i
+            return int(mj.mj_name2id(model, obj_type, name))
+
+        for key, value in action_dict.items():
+            act_id = _lookup(mj.mjtObj.mjOBJ_ACTUATOR, key)
+            if act_id >= 0:
+                data.ctrl[act_id] = float(value)
+            else:
+                # Fallback: key is a joint name - find the actuator that
+                # drives this joint via actuator_trnid (joint ID → actuator).
+                jnt_id = _lookup(mj.mjtObj.mjOBJ_JOINT, key)
+                if jnt_id >= 0:
+                    for ai in range(model.nu):
+                        if model.actuator_trnid[ai, 0] == jnt_id:
+                            data.ctrl[ai] = float(value)
+                            break
+
+        for _ in range(max(1, n_substeps)):
+            mj.mj_step(model, data)
+
+        assert self._world is not None
+        self._world.sim_time = data.time
+        self._world.step_count += n_substeps
+
+        if hasattr(self, "_viewer_handle") and self._viewer_handle is not None:
+            self._viewer_handle.sync()
+
+    def render(
+        self, camera_name: str = "default", width: int | None = None, height: int | None = None
+    ) -> dict[str, Any]:
+        """Render a camera view as base64 PNG image."""
+        if self._world is None or self._world._model is None or self._world._data is None:
+            return {"status": "error", "content": [{"text": "No world. Call create_world (or load_scene) first."}]}
+
+        mj = _ensure_mujoco()
+        # treat `None` as "use default", but `0` / negative values must
+        # still hit the validator (bool coercion would swallow them silently).
+        w = self.default_width if width is None else width
+        h = self.default_height if height is None else height
+        if err := self._validate_render_dims(w, h):
+            return err
+
+        try:
+            renderer = self._get_renderer(w, h)
+            if renderer is None:
+                return {
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                " Rendering unavailable (no OpenGL context). "
+                                "Install EGL or OSMesa for offscreen rendering: "
+                                "apt-get install libosmesa6-dev"
+                            )
+                        }
+                    ],
+                }
+            # strict camera validation - no silent fallback to default.
+            # Special 'default' / 'free' tokens route to the free camera; any
+            # other name MUST resolve or we error (prevents the LLM from
+            # believing it rendered viewpoint X while actually getting free-cam).
+            if camera_name in (None, "", "default", "free"):
+                cam_id = -1
+                label = "free (default)"
+            else:
+                cam_id = mj.mj_name2id(self._world._model, mj.mjtObj.mjOBJ_CAMERA, camera_name)
+                if cam_id < 0:
+                    return {
+                        "status": "error",
+                        "content": [
+                            {"text": f"Camera '{camera_name}' not found. Available: {self._list_camera_names()}"}
+                        ],
+                    }
+                label = camera_name
+
+            if cam_id >= 0:
+                renderer.update_scene(self._world._data, camera=cam_id)
+            else:
+                renderer.update_scene(self._world._data)
+
+            img = renderer.render().copy()
+
+            from PIL import Image
+
+            pil_img = Image.fromarray(img)
+            buffer = io.BytesIO()
+            pil_img.save(buffer, format="PNG")
+            png_bytes = buffer.getvalue()
+
+            # summary stats so render_all can flag empty-looking frames
+            # without decoding the PNG a second time.
+            import numpy as _np
+
+            pixel_var = float(_np.var(img))
+            pixel_mean = float(_np.mean(img))
+
+            return {
+                "status": "success",
+                "content": [
+                    {"text": f"📸 {w}x{h} from '{label}' at t={self._world.sim_time:.3f}s"},
+                    {"image": {"format": "png", "source": {"bytes": png_bytes}}},
+                    {"json": {"pixel_variance": pixel_var, "pixel_mean": pixel_mean, "camera": label}},
+                ],
+            }
+        except Exception as e:
+            return {"status": "error", "content": [{"text": f"Render failed: {e}"}]}
+
+    def render_depth(
+        self, camera_name: str = "default", width: int | None = None, height: int | None = None
+    ) -> dict[str, Any]:
+        """Render depth map from a camera."""
+        if self._world is None or self._world._model is None or self._world._data is None:
+            return {"status": "error", "content": [{"text": "No world. Call create_world (or load_scene) first."}]}
+
+        mj = _ensure_mujoco()
+        # see note in render() re: None vs 0/negative.
+        w = self.default_width if width is None else width
+        h = self.default_height if height is None else height
+        if err := self._validate_render_dims(w, h):
+            return err
+
+        try:
+            # strict camera validation (same policy as render())
+            if camera_name in (None, "", "default", "free"):
+                cam_id = -1
+                label = "free (default)"
+            else:
+                cam_id = mj.mj_name2id(self._world._model, mj.mjtObj.mjOBJ_CAMERA, camera_name)
+                if cam_id < 0:
+                    return {
+                        "status": "error",
+                        "content": [
+                            {"text": f"Camera '{camera_name}' not found. Available: {self._list_camera_names()}"}
+                        ],
+                    }
+                label = camera_name
+
+            renderer = self._get_renderer(w, h)
+            if renderer is None:
+                return {
+                    "status": "error",
+                    "content": [
+                        {
+                            "text": (
+                                " Depth rendering unavailable (no OpenGL context). "
+                                "Install EGL or OSMesa for offscreen rendering."
+                            )
+                        }
+                    ],
+                }
+            if cam_id >= 0:
+                renderer.update_scene(self._world._data, camera=cam_id)
+            else:
+                renderer.update_scene(self._world._data)
+            # MuJoCo prints a one-time ARB_clip_control warning on macOS
+            # when depth precision is reduced. Capture stderr on the first
+            # depth render so we can surface the warning in the response
+            # text (the LLM otherwise never hears about it).
+            clip_warn = getattr(self, "_depth_warn_text", None)
+            if clip_warn is None:
+                import contextlib as _ctx
+                import io as _io
+                import sys as _sys
+
+                buf = _io.StringIO()
+                with _ctx.redirect_stderr(buf):
+                    renderer.enable_depth_rendering()
+                    depth = renderer.render()
+                    renderer.disable_depth_rendering()
+                captured = buf.getvalue()
+                # Also forward to the real stderr so logs don't vanish.
+                if captured and _sys.__stderr__ is not None:
+                    try:
+                        _sys.__stderr__.write(captured)
+                    except Exception:
+                        pass
+                if "ARB_clip_control" in captured:
+                    # ARB_clip_control missing → OpenGL depth buffer uses
+                    # default [0,1] range with compressed far-plane precision.
+                    # After linearization below, Min/Max are still in meters,
+                    # but their precision (especially for distant pixels) is
+                    # degraded vs. a GPU with ARB_clip_control. Downstream
+                    # consumers should treat these values as approximate.
+                    self._depth_warn_text = (
+                        "⚠️ Depth accuracy limited on this GPU (missing ARB_clip_control). "
+                        "Linearized Min/Max are in meters but precision is degraded "
+                        "(especially for far-plane pixels) — treat as approximate."
+                    )
+                else:
+                    self._depth_warn_text = ""
+                clip_warn = self._depth_warn_text
+            else:
+                renderer.enable_depth_rendering()
+                depth = renderer.render()
+                renderer.disable_depth_rendering()
+
+            # Linearize OpenGL depth buffer to metric depth (meters).
+            # MuJoCo renderer returns normalized values in [0, 1] where 0 = near,
+            # 1 = far plane. Convert: z = znear*zfar / (zfar - d*(zfar - znear))
+            #
+            # On MuJoCo >= 3.0, `model.vis.map.{znear,zfar}` are fractions of
+            # `model.stat.extent` (the model's bounding scale), NOT absolute
+            # meters — multiply by extent to get real clip-plane distances.
+            # pyproject.toml pins mujoco>=3.2, so this convention is safe here.
+            import numpy as _np
+
+            extent = float(self._world._model.stat.extent)
+            znear = float(self._world._model.vis.map.znear) * extent
+            zfar = float(self._world._model.vis.map.zfar) * extent
+            # Avoid division by zero for pixels at exactly the far plane
+            denom = zfar - depth * (zfar - znear)
+            denom = _np.where(denom == 0, 1e-10, denom)
+            depth_m = znear * zfar / denom
+            # Clamp: pixels at far plane (depth==1) → zfar
+            depth_m = _np.clip(depth_m, znear, zfar)
+
+            text = (
+                f"📸 Depth {w}x{h} from '{label}'\nMin: {float(depth_m.min()):.4f}m, Max: {float(depth_m.max()):.4f}m"
+            )
+            if clip_warn:
+                text += f"\n{clip_warn}"
+            return {
+                "status": "success",
+                "content": [
+                    {"text": text},
+                    {"json": {"depth_min": float(depth_m.min()), "depth_max": float(depth_m.max())}},
+                ],
+            }
+        except Exception as e:
+            return {"status": "error", "content": [{"text": f"Depth render failed: {e}"}]}
+
+    def _list_camera_names(self) -> list[str]:
+        """helper to list all camera names (model-defined + SimCamera aliases)
+        for error messages when an unknown camera_name is requested."""
+        import mujoco as _mj
+
+        names: list[str] = []
+        if self._world is not None and self._world._model is not None:
+            for cid in range(self._world._model.ncam):
+                raw = _mj.mj_id2name(self._world._model, _mj.mjtObj.mjOBJ_CAMERA, cid)
+                if raw:
+                    names.append(raw)
+        # Include SimCamera registry keys (may match model names; dedupe)
+        for k in self._world.cameras.keys() if self._world else ():
+            if k not in names:
+                names.append(k)
+        return names
+
+    def get_contacts(self) -> dict[str, Any]:
+        """Return the list of active geom-geom contacts at the current step.
+
+        We run ``mj_forward`` first so the contact list reflects the
+        current qpos/qvel even immediately after ``reset`` or ``add_robot``
+        (without this, stale contacts from the previous step / uninitialised
+        memory can appear as phantom penetrations at t=0).
+        """
+        if self._world is None or self._world._model is None or self._world._data is None:
+            return {"status": "error", "content": [{"text": "No world. Call create_world (or load_scene) first."}]}
+
+        mj = _ensure_mujoco()
+        model, data = self._world._model, self._world._data
+        # Lock while running mj_forward + snapshotting contacts so a policy
+        # thread's mj_step can't mutate data.ncon / data.contact[] between our
+        # forward pass and the iteration. We copy the contact records under
+        # the lock; name resolution can then run lock-free.
+        with self._lock:
+            mj.mj_forward(model, data)
+            ncon = int(data.ncon)
+            contact_snapshot = [
+                {
+                    "geom1": int(data.contact[i].geom1),
+                    "geom2": int(data.contact[i].geom2),
+                    "dist": float(data.contact[i].dist),
+                    "pos": data.contact[i].pos.tolist(),
+                }
+                for i in range(ncon)
+            ]
+
+        def _resolve_geom(gid: int) -> str:
+            """Prefer the geom name; fall back to its parent body name; then id."""
+            gn = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, gid)
+            if gn:
+                return gn
+            # Walk to the parent body name.
+            try:
+                bid = int(model.geom_bodyid[gid])
+                bn = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, bid)
+                if bn:
+                    return f"{bn}/geom_{gid}"
+            except (IndexError, AttributeError):
+                pass
+            return f"geom_{gid}"
+
+        contacts = []
+        for c in contact_snapshot:
+            g1 = _resolve_geom(c["geom1"])
+            g2 = _resolve_geom(c["geom2"])
+            contacts.append({"geom1": g1, "geom2": g2, "dist": c["dist"], "pos": c["pos"]})
+
+        text = f"💥 {len(contacts)} contacts" if contacts else "No contacts."
+        if contacts:
+            for c in contacts[:10]:
+                text += f"\n  • {c['geom1']} ↔ {c['geom2']} (d={c['dist']:.4f})"
+
+        return {
+            "status": "success",
+            "content": [{"text": text}, {"json": {"contacts": contacts}}],
+        }
+
+    # Multi-camera capture - Session recording for simulation
+
+    #
+    # Design:
+    #  - render_all(cameras=None, width=, height=) - single-shot snapshot
+    #    of every camera at current sim_time. One PNG per camera.
+    #  - start_cameras_recording(...) - daemon thread, one imageio writer
+    #    per camera, appends frames at fps.
+    #  - stop_cameras_recording() - flushes writers, returns paths + sizes.
+    #  - get_cameras_recording_status() - frame counts, elapsed, per-cam.
+    #
+    # Thread safety: _get_renderer is thread-local (threading.local), so the
+    # background thread creates its own GL context. No shared state with
+    # main dispatch thread.
+
+    def _active_camera_list(self, cameras):
+        """Resolve cameras to concrete camera names currently in the world.
+
+        Handles namespaced camera names (e.g. 'arm0/wrist_cam') by also
+        checking the short suffix form ('wrist_cam').
+
+        Returns
+        -------
+        resolved : list[str]
+            Camera names that resolved to real model cameras.
+        unresolved_inputs : list[str]
+            User-supplied camera names that could NOT be resolved (empty
+            list when cameras is None or when every input matched).
+        """
+        if self._world is None or self._world._model is None:
+            return [], []
+        mj = _ensure_mujoco()
+        model = self._world._model
+        from_model = [mj.mj_id2name(model, mj.mjtObj.mjOBJ_CAMERA, i) for i in range(model.ncam)]
+        from_model = [c for c in from_model if c]
+        py_side = list(self._world.cameras.keys()) if self._world else []
+        all_cams = list(dict.fromkeys(from_model + py_side))
+        if cameras is None:
+            return all_cams, []
+        # Try to resolve unknown names via namespace prefix matching.
+        resolved: list[str] = []
+        unresolved: list[str] = []
+        for c in cameras:
+            if c in all_cams:
+                resolved.append(c)
+            else:
+                # Try suffix match: 'side' → 'arm0/side'
+                matches = [ac for ac in all_cams if ac.endswith("/" + c)]
+                if len(matches) == 1:
+                    resolved.append(matches[0])
+                    logger.debug("Camera '%s' resolved to namespaced '%s'", c, matches[0])
+                else:
+                    unresolved.append(c)
+                    logger.warning(
+                        "Camera '%s' not found. Available: %s",
+                        c,
+                        ", ".join(all_cams) or "(none)",
+                    )
+        return resolved, unresolved
+
+    def render_all(self, cameras=None, width=None, height=None):
+        """Render every (or a subset of) camera in one call.
+
+        Counterpart to ``render()`` for multi-view workflows - e.g. stereo,
+        overhead + wrist, or all cameras in a 4-view grid. Each camera ships
+        as its own ``{"image": {...}}`` block in the response.
+
+        Args:
+            cameras: list of camera names; None = every camera.
+            width:   per-camera width (defaults to camera's configured width).
+            height:  per-camera height (same).
+
+        Returns:
+            ``{"status", "content": [{"text": summary},
+                                     {"text": "📸 cam1"}, {"image": {...}},
+                                     {"text": "📸 cam2"}, {"image": {...}}, ...]}``
+        """
+        if self._world is None or self._world._model is None or self._world._data is None:
+            return {"status": "error", "content": [{"text": "No world. Call create_world (or load_scene) first."}]}
+        names, unresolved = self._active_camera_list(cameras)
+        if cameras is not None and unresolved:
+            return {
+                "status": "error",
+                "content": [{"text": f"Camera(s) not found: {unresolved}. Available: {self._list_camera_names()}"}],
+            }
+        if not names:
+            return {"status": "error", "content": [{"text": "No cameras in scene."}]}
+        content = []
+        ok, failed = 0, 0
+        low_var_warnings: list[str] = []
+        for cam_name in names:
+            r = self.render(camera_name=cam_name, width=width, height=height)
+            if r.get("status") == "success":
+                ok += 1
+                img_block = None
+                stats = None
+                for block in r.get("content", []):
+                    if isinstance(block, dict):
+                        if "image" in block and img_block is None:
+                            img_block = block
+                        if "json" in block and stats is None:
+                            stats = block["json"]
+                if img_block is not None:
+                    label = f"📸 {cam_name}"
+                    # flag near-uniform frames (all black / all clear).
+                    if stats and float(stats.get("pixel_variance", 99)) < 1.0:
+                        warn = f"⚠️ camera '{cam_name}': image appears empty (variance < 1)"
+                        label = f"{label}  {warn}"
+                        low_var_warnings.append(warn)
+                    content.append({"text": label})
+                    content.append(img_block)
+            else:
+                failed += 1
+                err = r.get("content", [{}])[0].get("text", "?")
+                content.append({"text": f"{cam_name}: {err}"})
+        warn_suffix = f", {len(low_var_warnings)} low-variance" if low_var_warnings else ""
+        summary = (
+            f"📸 Multi-camera snapshot at t={self._world.sim_time:.3f}s: "
+            f"{ok} ok, {failed} failed, {len(names)} requested{warn_suffix}"
+        )
+        return {
+            "status": "success" if ok else "error",
+            "content": [{"text": summary}, *content],
+        }
+
+    def start_cameras_recording(
+        self,
+        cameras=None,
+        output_dir=None,
+        fps=30,
+        width=None,
+        height=None,
+        name=None,
+        max_frames_per_camera=3000,
+    ):
+        """Start background capture of one ndarray buffer per camera.
+
+        Strategy: the background thread collects raw RGB frames in memory
+        (one list per camera). ``stop_cameras_recording`` then flushes each
+        list to an MP4 on the main thread. This avoids a long-lived ffmpeg
+        subprocess pipe that would break under concurrent imageio writes +
+        policy-loop timing jitter.
+
+        Memory cost: H*W*3 bytes * fps * duration * n_cams. For a 2s / 4-cam /
+        320x240 / 15fps rollout: ~27 MB. Bounded by ``max_frames_per_camera``.
+
+        Args:
+            cameras: list of camera names; None = every camera.
+            output_dir: where to write ``{tag}__{cam}.mp4``.
+            fps: capture rate.
+            width/height: per-frame size.
+            name: filename tag (auto if None).
+            max_frames_per_camera: safety cap on in-memory buffers.
+        """
+        import os as _os
+        import tempfile as _tempfile
+        import threading as _threading
+        import time as _time
+        import uuid as _uuid
+
+        if self._world is None or self._world._model is None or self._world._data is None:
+            return {"status": "error", "content": [{"text": "No world. Call create_world (or load_scene) first."}]}
+
+        if getattr(self, "_cams_rec_state", None) and self._cams_rec_state.get("running"):
+            cur = self._cams_rec_state["name"]
+            return {
+                "status": "error",
+                "content": [{"text": f"Already recording '{cur}'. Call stop_cameras_recording() first."}],
+            }
+
+        names, unresolved = self._active_camera_list(cameras)
+        # Strict validation: if user specified cameras, error on any unresolved names
+        # (same policy as render() and render_depth() — fail loudly, don't silently drop).
+        # NOTE: `unresolved` contains the raw user inputs that didn't map, so the
+        # namespace-suffix resolution path (e.g. 'side' → 'arm0/side') is preserved.
+        if cameras is not None and unresolved:
+            return {
+                "status": "error",
+                "content": [{"text": (f"Camera(s) not found: {unresolved}. Available: {self._list_camera_names()}")}],
+            }
+        if not names:
+            return {"status": "error", "content": [{"text": "No cameras to record."}]}
+
+        out_dir = _os.path.abspath(output_dir or _os.path.join(_tempfile.gettempdir(), "strands_robots", "recordings"))
+        _os.makedirs(out_dir, exist_ok=True)
+        tag = name or f"rec_{_uuid.uuid4().hex[:8]}"
+
+        buffers = {cam: [] for cam in names}
+        paths = {cam: _os.path.join(out_dir, f"{tag}__{cam}.mp4") for cam in names}
+
+        state = {
+            "running": True,
+            "name": tag,
+            "cameras": names,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "buffers": buffers,
+            "paths": paths,
+            "errors": dict.fromkeys(names, 0),
+            "output_dir": out_dir,
+            "started_at": _time.time(),
+            "thread": None,
+            "max_frames": max_frames_per_camera,
+        }
+
+        def _loop():
+            from strands_robots.simulation.policy_runner import _extract_frame_ndarray
+
+            interval = 1.0 / fps
+            while state["running"]:
+                t0 = _time.time()
+                for cam in names:
+                    if not state["running"]:
+                        break
+                    if len(state["buffers"][cam]) >= state["max_frames"]:
+                        continue
+                    try:
+                        r = self.render(camera_name=cam, width=width, height=height)
+                        arr = _extract_frame_ndarray(r)
+                        if arr is not None:
+                            state["buffers"][cam].append(arr)
+                        else:
+                            state["errors"][cam] += 1
+                    except Exception as e:
+                        state["errors"][cam] += 1
+                        logger.debug("camera recorder (%s) error: %s", cam, e)
+                lag = _time.time() - t0
+                if lag < interval:
+                    _time.sleep(interval - lag)
+
+        state["thread"] = _threading.Thread(target=_loop, daemon=True)
+        state["thread"].start()
+        self._cams_rec_state = state
+
+        msg = (
+            f"🎬 Recording {len(names)} camera(s) @ {fps} FPS → {out_dir}\n"
+            f"   tag: {tag}\n"
+            f"   cameras: {', '.join(names)}"
+        )
+        return {"status": "success", "content": [{"text": msg}]}
+
+    def stop_cameras_recording(self):
+        """Stop capture, flush buffers to MP4 on the MAIN thread.
+
+        Runs ``imageio.get_writer``/``append_data``/``close`` here instead of
+        the recording thread so the ffmpeg pipe doesn't race with policy
+        timing jitter. Returns per-camera frame counts and paths.
+        """
+        import os as _os
+        import time as _time
+
+        state = getattr(self, "_cams_rec_state", None)
+        if not state or not state.get("running"):
+            # idempotent - 'already stopped' is a success, not an error.
+            return {"status": "success", "content": [{"text": "Was not recording cameras."}]}
+
+        state["running"] = False
+        thread = state.get("thread")
+        if thread is not None:
+            thread.join(timeout=5.0)
+
+        try:
+            import imageio.v2 as imageio
+        except ImportError:
+            return {
+                "status": "error",
+                "content": [{"text": "imageio not installed. pip install imageio imageio-ffmpeg"}],
+            }
+
+        elapsed = _time.time() - state["started_at"]
+        lines = [
+            f"🎬 Stopped '{state['name']}' after {elapsed:.1f}s",
+            f"   output_dir: {state['output_dir']}",
+        ]
+        artifacts = []
+        for cam in state["cameras"]:
+            frames_buffer = state["buffers"][cam]
+            path = state["paths"][cam]
+            errors = state["errors"][cam]
+            frames_written = 0
+            size_kb = 0.0
+            if frames_buffer:
+                writer = imageio.get_writer(path, fps=state["fps"], quality=8, macro_block_size=1)
+                try:
+                    for arr in frames_buffer:
+                        writer.append_data(arr)
+                        frames_written += 1
+                finally:
+                    writer.close()
+                if _os.path.exists(path):
+                    size_kb = _os.path.getsize(path) / 1024
+            lines.append(
+                f"   📹 {cam:20s} {frames_written:>5d} frames  {size_kb:>7.1f} KB  "
+                f"({errors} errors)  → {_os.path.basename(path)}"
+            )
+            artifacts.append(
+                {
+                    "camera": cam,
+                    "path": path,
+                    "frames": frames_written,
+                    "errors": errors,
+                    "size_kb": size_kb,
+                }
+            )
+
+        name = state["name"]
+        self._cams_rec_state = None
+
+        return {
+            "status": "success",
+            "content": [
+                {"text": "\n".join(lines)},
+                {"json": {"recording": name, "artifacts": artifacts}},
+            ],
+        }
+
+    def get_cameras_recording_status(self):
+        """Cheap introspection of an ongoing multi-camera recording."""
+        import time as _time
+
+        state = getattr(self, "_cams_rec_state", None)
+        if not state or not state.get("running"):
+            return {"status": "success", "content": [{"text": "⚪ No active camera recording."}]}
+
+        elapsed = _time.time() - state["started_at"]
+        lines = [f"🟢 Recording '{state['name']}' for {elapsed:.1f}s  @ {state['fps']} FPS"]
+        for cam in state["cameras"]:
+            frames = len(state["buffers"][cam])
+            lines.append(f"   📹 {cam:20s} {frames:>5d} frames  ({state['errors'][cam]} errors)")
+        return {"status": "success", "content": [{"text": "\n".join(lines)}]}
