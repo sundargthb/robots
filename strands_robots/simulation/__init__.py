@@ -99,8 +99,9 @@ from strands_robots.simulation.predicates import (
 
 # Heavy imports (lazy - need strands SDK + mujoco)
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    "Simulation": ("strands_robots.simulation.mujoco.simulation", "Simulation"),
-    "MuJoCoSimulation": ("strands_robots.simulation.mujoco.simulation", "Simulation"),
+    "MuJoCoSimEngine": ("strands_robots.simulation.mujoco.simulation", "MuJoCoSimEngine"),
+    "Simulation": ("strands_robots.simulation.mujoco.simulation", "MuJoCoSimEngine"),
+    "MuJoCoSimulation": ("strands_robots.simulation.mujoco.simulation", "MuJoCoSimEngine"),
     "SpecBuilder": ("strands_robots.simulation.mujoco.spec_builder", "SpecBuilder"),
     "_configure_gl_backend": ("strands_robots.simulation.mujoco.backend", "_configure_gl_backend"),
     "_ensure_mujoco": ("strands_robots.simulation.mujoco.backend", "_ensure_mujoco"),
@@ -116,6 +117,7 @@ __all__ = [
     "list_backends",
     "register_backend",
     # Default backend alias
+    "MuJoCoSimEngine",
     "Simulation",
     "MuJoCoSimulation",
     # Shared dataclasses
